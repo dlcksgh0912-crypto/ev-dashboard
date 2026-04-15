@@ -1,6 +1,22 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabase';
+
+function getFileType(fileName = '') {
+  const lower = String(fileName).toLowerCase();
+
+  if (fileName.includes('충전기_상태정보_리스트') || lower.includes('상태정보')) {
+    return 'raw';
+  }
+  if (fileName.includes('충전기 교체건') || lower.includes('교체')) {
+    return 'replacement';
+  }
+  if (fileName.includes('VOC접수건') || lower.endsWith('.csv') || lower.includes('voc')) {
+    return 'voc';
+  }
+
+  return 'etc';
+}
 
 const handleServerUpload = async (file) => {
   if (!file) return;
@@ -17,6 +33,7 @@ const handleServerUpload = async (file) => {
 
   const safeFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
   const filePath = `${user.id}/${Date.now()}-${safeFileName}`;
+  const fileType = getFileType(file.name);
 
   const { error: uploadError } = await supabase.storage
     .from('uploads')
@@ -33,6 +50,7 @@ const handleServerUpload = async (file) => {
 
   const { error: dbError } = await supabase.from('uploaded_files').insert({
     user_id: user.id,
+    file_type: fileType,
     original_name: file.name,
     storage_path: filePath,
   });
@@ -43,7 +61,7 @@ const handleServerUpload = async (file) => {
     throw dbError;
   }
 
-  return { user, filePath };
+  return { user, filePath, fileType };
 };
 
 const COLORS = {
@@ -172,11 +190,11 @@ function findHeaderIndex(headers, candidates) {
 function mapRawColumns(headerRow) {
   const headers = headerRow.map((h) => normalizeText(h));
   return {
-    chargerId: 2,         // C
-    siteName: 5,          // F
-    siteStatus: 6,        // G
-    collectedAt: 10,      // K
-    overAbnormal: 17,     // R
+    chargerId: 2,
+    siteName: 5,
+    siteStatus: 6,
+    collectedAt: 10,
+    overAbnormal: 17,
     usageCount: findHeaderIndex(headers, ['누적 사용량', '누적사용량']),
     address: findHeaderIndex(headers, ['주소']),
     detailAddress: findHeaderIndex(headers, ['상세주소']),
@@ -246,7 +264,7 @@ function parseRawFile(file, rows) {
 function parseReplacementFile(rows) {
   const set = new Set();
   rows.slice(1).forEach((row) => {
-    const id = normalizeId(row[1]); // B열
+    const id = normalizeId(row[1]);
     if (id) set.add(id);
   });
   return set;
@@ -255,14 +273,14 @@ function parseReplacementFile(rows) {
 function mapVocColumns(headerRow) {
   const headers = headerRow.map((h) => normalizeText(h));
   return {
-    matchId: 13,          // N
-    siteName: 14,         // O
-    progressName: 15,     // P
-    progressOrg: 16,      // Q
-    completedAt: 17,      // R
-    completedName: 18,    // S
-    completedOrg: 19,     // T
-    completedContent: 20, // U
+    matchId: 13,
+    siteName: 14,
+    progressName: 15,
+    progressOrg: 16,
+    completedAt: 17,
+    completedName: 18,
+    completedOrg: 19,
+    completedContent: 20,
     receivedAt: findHeaderIndex(headers, ['접수일', '접수일시']),
   };
 }
@@ -501,10 +519,93 @@ export default function Dashboard() {
   const [orgFilter, setOrgFilter] = useState('all');
   const [vocPartStartDate, setVocPartStartDate] = useState('');
   const [vocPartEndDate, setVocPartEndDate] = useState('');
+  const [isRestoring, setIsRestoring] = useState(true);
 
   const pushLog = (text) => {
     setLogs((prev) => [text, ...prev].slice(0, 8));
   };
+
+  useEffect(() => {
+    const restoreDashboard = async () => {
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          setIsRestoring(false);
+          return;
+        }
+
+        const { data: savedFiles, error: filesError } = await supabase
+          .from('uploaded_files')
+          .select('*')
+          .eq('user_id', user.id)
+          .in('file_type', ['raw', 'voc', 'replacement'])
+          .order('created_at', { ascending: false });
+
+        if (filesError) {
+          console.error('저장 파일 조회 실패:', filesError);
+          pushLog('저장된 파일 조회 실패');
+          setIsRestoring(false);
+          return;
+        }
+
+        if (!savedFiles || savedFiles.length === 0) {
+          pushLog('저장된 파일이 없습니다.');
+          setIsRestoring(false);
+          return;
+        }
+
+        const latestByType = {
+          raw: savedFiles.find((file) => file.file_type === 'raw'),
+          voc: savedFiles.find((file) => file.file_type === 'voc'),
+          replacement: savedFiles.find((file) => file.file_type === 'replacement'),
+        };
+
+        const loadAndParseStoredFile = async (savedFile) => {
+          if (!savedFile) return;
+
+          const { data: downloadData, error: downloadError } = await supabase.storage
+            .from('uploads')
+            .download(savedFile.storage_path);
+
+          if (downloadError) {
+            console.error('파일 다운로드 실패:', downloadError);
+            pushLog(`복원 실패: ${savedFile.original_name}`);
+            return;
+          }
+
+          const arrayBuffer = await downloadData.arrayBuffer();
+          const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+          const rows = workbookToRows(workbook);
+
+          if (savedFile.file_type === 'raw') {
+            setRawState(parseRawFile({ name: savedFile.original_name }, rows));
+            pushLog(`자동 복원 완료: ${savedFile.original_name}`);
+          } else if (savedFile.file_type === 'voc') {
+            setVocRows(parseVocFile(rows));
+            pushLog(`자동 복원 완료: ${savedFile.original_name}`);
+          } else if (savedFile.file_type === 'replacement') {
+            setReplacementSet(parseReplacementFile(rows));
+            pushLog(`자동 복원 완료: ${savedFile.original_name}`);
+          }
+        };
+
+        await loadAndParseStoredFile(latestByType.raw);
+        await loadAndParseStoredFile(latestByType.voc);
+        await loadAndParseStoredFile(latestByType.replacement);
+      } catch (error) {
+        console.error('자동 복원 중 오류:', error);
+        pushLog('자동 복원 중 오류 발생');
+      } finally {
+        setIsRestoring(false);
+      }
+    };
+
+    restoreDashboard();
+  }, []);
 
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -739,6 +840,10 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {isRestoring && (
+          <div style={styles.alertBox}>저장된 파일을 불러오는 중입니다...</div>
+        )}
+
         <div style={styles.topGrid}>
           <div style={styles.panel}>
             <div style={styles.sectionTitle}>산정 기준</div>
@@ -763,7 +868,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {!mergedRows.length && (
+        {!mergedRows.length && !isRestoring && (
           <div style={styles.alertBox}>먼저 충전기_상태정보_리스트 파일을 업로드해주세요.</div>
         )}
 

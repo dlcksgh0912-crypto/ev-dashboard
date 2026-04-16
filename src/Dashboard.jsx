@@ -2,6 +2,28 @@ import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabase';
 
+/**
+ * 관리자 계정 이메일
+ * - 현재는 사용자 1명 운영 기준이므로 여기 이메일만 바꿔 사용하면 됩니다.
+ * - 추후에는 profiles.is_admin 기반으로 전환 가능
+ */
+const ADMIN_EMAILS = [
+  'chan0912@everon.co.kr',
+];
+
+/**
+ * profiles 테이블 필요 컬럼 예시
+ * id uuid primary key
+ * email text
+ * approved boolean default false
+ * is_admin boolean default false
+ * created_at timestamp default now()
+ */
+
+function isAdminEmail(email = '') {
+  return ADMIN_EMAILS.includes(String(email).toLowerCase());
+}
+
 function getFileType(fileName = '') {
   const lower = String(fileName).toLowerCase();
 
@@ -75,6 +97,7 @@ const COLORS = {
   red: '#dc2626',
   violet: '#7c3aed',
   slate: '#475569',
+  green: '#16a34a',
 };
 
 const PART_PATTERNS = {
@@ -507,6 +530,11 @@ function DonutChart({ dashboard }) {
 }
 
 export default function Dashboard() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [isApproved, setIsApproved] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [approvalChecked, setApprovalChecked] = useState(false);
+
   const [rawState, setRawState] = useState(null);
   const [replacementSet, setReplacementSet] = useState(new Set());
   const [vocRows, setVocRows] = useState([]);
@@ -521,23 +549,135 @@ export default function Dashboard() {
   const [vocPartEndDate, setVocPartEndDate] = useState('');
   const [isRestoring, setIsRestoring] = useState(true);
 
+  const [profiles, setProfiles] = useState([]);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+
   const pushLog = (text) => {
-    setLogs((prev) => [text, ...prev].slice(0, 8));
+    setLogs((prev) => [text, ...prev].slice(0, 12));
+  };
+
+  const ensureProfileAndCheckApproval = async () => {
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      setApprovalChecked(true);
+      setIsRestoring(false);
+      return null;
+    }
+
+    setCurrentUser(user);
+
+    const email = String(user.email || '').toLowerCase();
+    const adminFlagByEmail = isAdminEmail(email);
+
+    const { error: upsertError } = await supabase.from('profiles').upsert(
+      {
+        id: user.id,
+        email,
+        approved: adminFlagByEmail ? true : false,
+        is_admin: adminFlagByEmail,
+      },
+      { onConflict: 'id' }
+    );
+
+    if (upsertError) {
+      console.error('profiles upsert 실패:', upsertError);
+      pushLog('사용자 프로필 저장 실패');
+    }
+
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('approved, is_admin, email')
+      .eq('id', user.id)
+      .single();
+
+    if (profileError) {
+      console.error('승인 여부 조회 실패:', profileError);
+      pushLog('승인 여부 조회 실패');
+      setApprovalChecked(true);
+      setIsRestoring(false);
+      return null;
+    }
+
+    const approved = !!profile?.approved || adminFlagByEmail;
+    const admin = !!profile?.is_admin || adminFlagByEmail;
+
+    setIsApproved(approved);
+    setIsAdmin(admin);
+    setApprovalChecked(true);
+
+    if (!approved) {
+      alert('승인 대기 상태입니다. 관리자 승인 후 사용 가능합니다.');
+      await supabase.auth.signOut();
+      setIsRestoring(false);
+      return null;
+    }
+
+    return user;
+  };
+
+  const fetchProfiles = async () => {
+    if (!isAdmin) return;
+    setProfilesLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, email, approved, is_admin, created_at')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('profiles 조회 실패:', error);
+        pushLog('사용자 목록 조회 실패');
+        return;
+      }
+
+      setProfiles(data || []);
+    } finally {
+      setProfilesLoading(false);
+    }
+  };
+
+  const approveUser = async (profileId) => {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ approved: true })
+      .eq('id', profileId);
+
+    if (error) {
+      console.error('승인 처리 실패:', error);
+      alert(`승인 처리 실패: ${error.message}`);
+      return;
+    }
+
+    pushLog('사용자 승인 완료');
+    fetchProfiles();
+  };
+
+  const revokeUser = async (profileId) => {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ approved: false })
+      .eq('id', profileId);
+
+    if (error) {
+      console.error('승인 해제 실패:', error);
+      alert(`승인 해제 실패: ${error.message}`);
+      return;
+    }
+
+    pushLog('사용자 승인 해제 완료');
+    fetchProfiles();
   };
 
   useEffect(() => {
-    const restoreDashboard = async () => {
+    const init = async () => {
+      const user = await ensureProfileAndCheckApproval();
+      if (!user) return;
+
       try {
-        const {
-          data: { user },
-          error: userError,
-        } = await supabase.auth.getUser();
-
-        if (userError || !user) {
-          setIsRestoring(false);
-          return;
-        }
-
         const { data: savedFiles, error: filesError } = await supabase
           .from('uploaded_files')
           .select('*')
@@ -559,9 +699,12 @@ export default function Dashboard() {
         }
 
         const latestByType = {
-          raw: savedFiles.find((file) => file.file_type === 'raw'),
-          voc: savedFiles.find((file) => file.file_type === 'voc'),
-          replacement: savedFiles.find((file) => file.file_type === 'replacement'),
+          raw: savedFiles.find((file) => file.file_type === 'raw')
+            || savedFiles.find((file) => String(file.original_name || '').includes('상태정보')),
+          voc: savedFiles.find((file) => file.file_type === 'voc')
+            || savedFiles.find((file) => String(file.original_name || '').toLowerCase().includes('voc')),
+          replacement: savedFiles.find((file) => file.file_type === 'replacement')
+            || savedFiles.find((file) => String(file.original_name || '').includes('교체')),
         };
 
         const loadAndParseStoredFile = async (savedFile) => {
@@ -581,13 +724,13 @@ export default function Dashboard() {
           const workbook = XLSX.read(arrayBuffer, { type: 'array' });
           const rows = workbookToRows(workbook);
 
-          if (savedFile.file_type === 'raw') {
+          if (savedFile.file_type === 'raw' || String(savedFile.original_name || '').includes('상태정보')) {
             setRawState(parseRawFile({ name: savedFile.original_name }, rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
-          } else if (savedFile.file_type === 'voc') {
+          } else if (savedFile.file_type === 'voc' || String(savedFile.original_name || '').toLowerCase().includes('voc')) {
             setVocRows(parseVocFile(rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
-          } else if (savedFile.file_type === 'replacement') {
+          } else if (savedFile.file_type === 'replacement' || String(savedFile.original_name || '').includes('교체')) {
             setReplacementSet(parseReplacementFile(rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
           }
@@ -604,8 +747,14 @@ export default function Dashboard() {
       }
     };
 
-    restoreDashboard();
+    init();
   }, []);
+
+  useEffect(() => {
+    if (isAdmin) {
+      fetchProfiles();
+    }
+  }, [isAdmin]);
 
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -797,6 +946,65 @@ export default function Dashboard() {
       .sort((a, b) => b[1] - a[1]);
   }, [partUsageRows]);
 
+  const downloadDetailsExcel = () => {
+    const exportRows = filteredRows.map((row) => ({
+      충전소ID: row.siteId || '-',
+      충전기ID: row.chargerId || '-',
+      충전소명: row.siteName || '-',
+      주소: row.address || '-',
+      상세주소: row.detailAddress || '-',
+      상태: row.isFault ? '고장' : row.isApprovalPending ? '승인대기' : '정상 운영',
+      고장분류: row.faultType || '-',
+      최근수집일: row.collectedAtText || '-',
+      재발생여부: row.recurrenceLabel || '-',
+      장기미조치: row.isLongPending ? '장기 미조치' : '-',
+      과다이상: row.isVocOverAbnormal ? '과다이상' : '-',
+      최근완료일: row.latestCompletedAtText || '-',
+      이후내용: row.latestCompletedContent || '-',
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '상세내역');
+    XLSX.writeFile(wb, `상세내역_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const downloadVocPartsExcel = () => {
+    const exportRows = partUsageRows.map((row) => ({
+      충전소ID: row.siteId || '-',
+      충전기ID: row.chargerId || '-',
+      충전소명: row.siteName || '-',
+      완료일시: row.completedAtText || '-',
+      사용부품: row.usedParts || '-',
+      완료내용: row.fullContent || '-',
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'VOC부품교체내역');
+    XLSX.writeFile(wb, `VOC부품교체내역_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  if (!approvalChecked) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.container}>
+          <div style={styles.alertBox}>사용자 승인 여부를 확인하는 중입니다...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isApproved) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.container}>
+          <div style={styles.alertBox}>승인 대기 상태입니다. 관리자 승인 후 다시 로그인해주세요.</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.page}>
       <div style={styles.container}>
@@ -804,6 +1012,10 @@ export default function Dashboard() {
           <div>
             <h1 style={styles.pageTitle}>충전기 관리 대시보드</h1>
             <div style={styles.pageDesc}>운영 현황, 현재 상태, 조치 진행 상황을 전체적으로 확인합니다.</div>
+            <div style={{ marginTop: 8, color: COLORS.sub, fontSize: 13 }}>
+              로그인 계정: <strong>{currentUser?.email || '-'}</strong>
+              {isAdmin ? ' / 관리자' : ''}
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <label style={styles.uploadButton}>
@@ -850,7 +1062,7 @@ export default function Dashboard() {
             <ul style={styles.guideList}>
               <li>RAW 상태정보 파일은 4행 헤더, 5행부터 데이터를 읽습니다.</li>
               <li>전체 충전기 수는 RAW C열 충전기 ID 기준입니다.</li>
-              <li>승인대기는 수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하</li>
+              <li>승인대기는 수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하입니다.</li>
               <li>고장 산정은 파일명 기준 시각인 07:00 이전 수집값 또는 과다이상 기준입니다.</li>
               <li>VOC 처리중은 완료자명과 완료자 소속이 모두 공백인 기준입니다.</li>
               <li>장기 미조치는 VOC 조치 예정 중 판정 기준일 대비 14일 이상 경과 건입니다.</li>
@@ -877,6 +1089,9 @@ export default function Dashboard() {
           <button style={tab === 'details' ? styles.tabActive : styles.tab} onClick={() => setTab('details')}>상세내역</button>
           <button style={tab === 'search' ? styles.tabActive : styles.tab} onClick={() => setTab('search')}>충전소 조회</button>
           <button style={tab === 'voc' ? styles.tabActive : styles.tab} onClick={() => setTab('voc')}>VOC 현황</button>
+          {isAdmin && (
+            <button style={tab === 'admin' ? styles.tabActive : styles.tab} onClick={() => setTab('admin')}>사용자 관리</button>
+          )}
         </div>
 
         {tab === 'dashboard' && (
@@ -924,7 +1139,13 @@ export default function Dashboard() {
 
         {tab === 'details' && (
           <div style={styles.panel}>
-            <div style={styles.sectionTitle}>상세내역</div>
+            <div style={styles.sectionTitleRow}>
+              <div style={styles.sectionTitleNoMargin}>상세내역</div>
+              <button style={styles.secondaryButton} onClick={downloadDetailsExcel}>
+                결과 엑셀 다운로드
+              </button>
+            </div>
+
             <div style={styles.filterRowWide}>
               <input
                 style={styles.inputNarrow}
@@ -1109,7 +1330,12 @@ export default function Dashboard() {
             </div>
 
             <div style={styles.panel}>
-              <div style={styles.sectionTitle}>부품 교체 내역</div>
+              <div style={styles.sectionTitleRow}>
+                <div style={styles.sectionTitleNoMargin}>부품 교체 내역</div>
+                <button style={styles.secondaryButton} onClick={downloadVocPartsExcel}>
+                  리스트 엑셀 다운로드
+                </button>
+              </div>
               <div style={styles.tableWrap}>
                 <table style={styles.table}>
                   <thead>
@@ -1142,6 +1368,86 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+
+        {tab === 'admin' && isAdmin && (
+          <div style={styles.vocLayout}>
+            <div style={styles.panel}>
+              <div style={styles.sectionTitleRow}>
+                <div style={styles.sectionTitleNoMargin}>사용자 승인 관리</div>
+                <button style={styles.secondaryButton} onClick={fetchProfiles}>
+                  새로고침
+                </button>
+              </div>
+
+              <div style={{ color: COLORS.sub, fontSize: 13, marginBottom: 16 }}>
+                회원가입한 사용자는 승인 전까지 로그인 후 사용이 제한됩니다.
+              </div>
+
+              <div style={styles.summaryGrid2}>
+                <div style={styles.summaryBox}>
+                  승인 완료 <strong>{profiles.filter((p) => p.approved).length}명</strong>
+                </div>
+                <div style={styles.summaryBox}>
+                  승인 대기 <strong>{profiles.filter((p) => !p.approved).length}명</strong>
+                </div>
+              </div>
+            </div>
+
+            <div style={styles.panel}>
+              <div style={styles.sectionTitle}>사용자 목록</div>
+              {profilesLoading ? (
+                <div style={{ color: COLORS.sub }}>사용자 목록을 불러오는 중입니다...</div>
+              ) : (
+                <div style={styles.tableWrap}>
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: '30%' }}>이메일</th>
+                        <th style={{ width: '15%' }}>승인여부</th>
+                        <th style={{ width: '15%' }}>관리자</th>
+                        <th style={{ width: '20%' }}>생성일시</th>
+                        <th style={{ width: '20%' }}>관리</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {profiles.map((profile) => (
+                        <tr key={profile.id}>
+                          <td>{profile.email || '-'}</td>
+                          <td>{profile.approved ? '승인 완료' : '승인 대기'}</td>
+                          <td>{profile.is_admin ? '관리자' : '-'}</td>
+                          <td>{profile.created_at ? formatDate(new Date(profile.created_at)) : '-'}</td>
+                          <td>
+                            <div style={styles.actionButtonWrap}>
+                              {!profile.approved ? (
+                                <button style={styles.approveButton} onClick={() => approveUser(profile.id)}>
+                                  승인
+                                </button>
+                              ) : (
+                                <button
+                                  style={styles.revokeButton}
+                                  onClick={() => revokeUser(profile.id)}
+                                  disabled={profile.email === currentUser?.email}
+                                  title={profile.email === currentUser?.email ? '본인 계정은 승인 해제 불가' : ''}
+                                >
+                                  승인 해제
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {profiles.length === 0 && (
+                        <tr>
+                          <td colSpan="5">등록된 사용자가 없습니다.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1156,9 +1462,14 @@ const styles = {
   uploadButton: { background: COLORS.text, color: '#fff', padding: '12px 18px', borderRadius: 12, cursor: 'pointer', fontWeight: 700 },
   logoutButton: { background: '#fff', color: COLORS.text, border: `1px solid ${COLORS.border}`, padding: '12px 18px', borderRadius: 12, cursor: 'pointer', fontWeight: 700 },
   resetButton: { background: '#fff', color: COLORS.text, border: `1px solid ${COLORS.border}`, padding: '12px 18px', borderRadius: 12, cursor: 'pointer', fontWeight: 700 },
+  secondaryButton: { background: '#fff', color: COLORS.text, border: `1px solid ${COLORS.border}`, padding: '10px 14px', borderRadius: 10, cursor: 'pointer', fontWeight: 700, whiteSpace: 'nowrap' },
+  approveButton: { background: COLORS.green, color: '#fff', border: 'none', padding: '8px 12px', borderRadius: 8, cursor: 'pointer', fontWeight: 700 },
+  revokeButton: { background: '#fff', color: COLORS.red, border: `1px solid ${COLORS.red}`, padding: '8px 12px', borderRadius: 8, cursor: 'pointer', fontWeight: 700 },
   topGrid: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginBottom: 20 },
   panel: { background: COLORS.panel, border: `1px solid ${COLORS.border}`, borderRadius: 20, padding: 20 },
   sectionTitle: { fontSize: 18, fontWeight: 700, marginBottom: 14 },
+  sectionTitleNoMargin: { fontSize: 18, fontWeight: 700 },
+  sectionTitleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' },
   guideList: { margin: 0, paddingLeft: 18, lineHeight: 1.8, color: COLORS.sub },
   logItem: { background: '#f8fafc', borderRadius: 12, padding: 12, fontSize: 14 },
   alertBox: { background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', borderRadius: 16, padding: 16, marginBottom: 20, fontWeight: 700 },
@@ -1202,4 +1513,5 @@ const styles = {
   vocLayout: { display: 'grid', gap: 16 },
   dateFilterRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
   partSummaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 },
+  actionButtonWrap: { display: 'flex', gap: 8, justifyContent: 'center' },
 };

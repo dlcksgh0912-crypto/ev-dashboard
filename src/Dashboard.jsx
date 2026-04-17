@@ -25,15 +25,33 @@ function isAdminEmail(email = '') {
 }
 
 function getFileType(fileName = '') {
-  const lower = String(fileName).toLowerCase();
+  const original = String(fileName || '').trim();
+  const lower = original.toLowerCase();
 
-  if (fileName.includes('충전기_상태정보_리스트') || lower.includes('상태정보')) {
+  // RAW 상태정보
+  if (
+    original.includes('충전기_상태정보_리스트') ||
+    original.includes('충전기 상태정보 리스트') ||
+    lower.includes('상태정보')
+  ) {
     return 'raw';
   }
-  if (fileName.includes('충전기 교체건') || lower.includes('교체')) {
+
+  // 교체건
+  if (
+    original.includes('충전기 교체건') ||
+    original.includes('교체건') ||
+    lower.includes('replacement')
+  ) {
     return 'replacement';
   }
-  if (fileName.includes('VOC접수건') || lower.endsWith('.csv') || lower.includes('voc')) {
+
+  // VOC
+  if (
+    original.includes('VOC접수건') ||
+    lower.includes('voc') ||
+    lower.endsWith('.csv')
+  ) {
     return 'voc';
   }
 
@@ -700,11 +718,11 @@ export default function Dashboard() {
 
         const latestByType = {
           raw: savedFiles.find((file) => file.file_type === 'raw')
-            || savedFiles.find((file) => String(file.original_name || '').includes('상태정보')),
+            || savedFiles.find((file) => getFileType(file.original_name) === 'raw'),
           voc: savedFiles.find((file) => file.file_type === 'voc')
-            || savedFiles.find((file) => String(file.original_name || '').toLowerCase().includes('voc')),
+            || savedFiles.find((file) => getFileType(file.original_name) === 'voc'),
           replacement: savedFiles.find((file) => file.file_type === 'replacement')
-            || savedFiles.find((file) => String(file.original_name || '').includes('교체')),
+            || savedFiles.find((file) => getFileType(file.original_name) === 'replacement'),
         };
 
         const loadAndParseStoredFile = async (savedFile) => {
@@ -724,13 +742,15 @@ export default function Dashboard() {
           const workbook = XLSX.read(arrayBuffer, { type: 'array' });
           const rows = workbookToRows(workbook);
 
-          if (savedFile.file_type === 'raw' || String(savedFile.original_name || '').includes('상태정보')) {
+          const restoredType = savedFile.file_type || getFileType(savedFile.original_name);
+
+          if (restoredType === 'raw') {
             setRawState(parseRawFile({ name: savedFile.original_name }, rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
-          } else if (savedFile.file_type === 'voc' || String(savedFile.original_name || '').toLowerCase().includes('voc')) {
+          } else if (restoredType === 'voc') {
             setVocRows(parseVocFile(rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
-          } else if (savedFile.file_type === 'replacement' || String(savedFile.original_name || '').includes('교체')) {
+          } else if (restoredType === 'replacement') {
             setReplacementSet(parseReplacementFile(rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
           }
@@ -766,13 +786,15 @@ export default function Dashboard() {
         const workbook = XLSX.read(buffer, { type: 'array' });
         const rows = workbookToRows(workbook);
 
-        if (file.name.includes('충전기_상태정보_리스트')) {
+        const detectedType = getFileType(file.name);
+
+        if (detectedType === 'raw') {
           setRawState(parseRawFile(file, rows));
           pushLog(`RAW 상태정보 반영: ${file.name}`);
-        } else if (file.name.includes('충전기 교체건')) {
+        } else if (detectedType === 'replacement') {
           setReplacementSet(parseReplacementFile(rows));
           pushLog(`교체 예정 반영: ${file.name}`);
-        } else if (file.name.includes('VOC접수건') || file.name.toLowerCase().endsWith('.csv')) {
+        } else if (detectedType === 'voc') {
           setVocRows(parseVocFile(rows));
           pushLog(`VOC 파일 반영: ${file.name}`);
         } else {
@@ -1010,7 +1032,7 @@ export default function Dashboard() {
       <div style={styles.container}>
         <div style={styles.headerBox}>
           <div>
-            <h1 style={styles.pageTitle}>충전기 관리 대시보드</h1>
+            <h1 style={styles.pageTitle}><span style={{ color: '#38bdf8' }}>EverOn</span> Care Hub</h1>
             <div style={styles.pageDesc}>운영 현황, 현재 상태, 조치 진행 상황을 전체적으로 확인합니다.</div>
             <div style={{ marginTop: 8, color: COLORS.sub, fontSize: 13 }}>
               로그인 계정: <strong>{currentUser?.email || '-'}</strong>
@@ -1056,30 +1078,6 @@ export default function Dashboard() {
           <div style={styles.alertBox}>저장된 파일을 불러오는 중입니다...</div>
         )}
 
-        <div style={styles.topGrid}>
-          <div style={styles.panel}>
-            <div style={styles.sectionTitle}>산정 기준</div>
-            <ul style={styles.guideList}>
-              <li>RAW 상태정보 파일은 4행 헤더, 5행부터 데이터를 읽습니다.</li>
-              <li>전체 충전기 수는 RAW C열 충전기 ID 기준입니다.</li>
-              <li>승인대기는 수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하입니다.</li>
-              <li>고장 산정은 파일명 기준 시각인 07:00 이전 수집값 또는 과다이상 기준입니다.</li>
-              <li>VOC 처리중은 완료자명과 완료자 소속이 모두 공백인 기준입니다.</li>
-              <li>장기 미조치는 VOC 조치 예정 중 판정 기준일 대비 14일 이상 경과 건입니다.</li>
-            </ul>
-          </div>
-          <div style={styles.panel}>
-            <div style={styles.sectionTitle}>최근 반영 로그</div>
-            <div style={{ display: 'grid', gap: 8 }}>
-              {logs.length === 0 ? (
-                <div style={{ color: COLORS.sub }}>아직 업로드된 파일이 없습니다.</div>
-              ) : (
-                logs.map((log, idx) => <div key={`${log}-${idx}`} style={styles.logItem}>{log}</div>)
-              )}
-            </div>
-          </div>
-        </div>
-
         {!mergedRows.length && !isRestoring && (
           <div style={styles.alertBox}>먼저 충전기_상태정보_리스트 파일을 업로드해주세요.</div>
         )}
@@ -1110,6 +1108,8 @@ export default function Dashboard() {
               <StatCard title="미인입 고장" value={`${dashboard.uninbound.toLocaleString()}기`} sub="임의 OFF / VOC 조치 예정 / 교체 예정 제외" color={COLORS.slate} />
             </div>
 
+
+
             <div style={styles.middleGrid}>
               <StatCard title="교체 예정" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" color={COLORS.blue} />
               <StatCard title="임의 OFF" value={`${dashboard.manualOff.toLocaleString()}기`} sub="충전기 중 충전상태 기준" color={COLORS.red} />
@@ -1118,7 +1118,6 @@ export default function Dashboard() {
                 <DonutChart dashboard={dashboard} />
               </div>
             </div>
-
             <div style={styles.topGrid}>
               <div style={styles.panel}>
                 <div style={styles.sectionTitle}>판정 기준</div>
@@ -1134,6 +1133,30 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
+
+        <div style={styles.topGrid}>
+          <div style={{ ...styles.panel, maxHeight: 220, overflowY: 'auto' }}>
+            <div style={styles.sectionTitle}>산정 기준</div>
+            <ul style={styles.guideList}>
+              <li>RAW 상태정보 파일은 4행 헤더, 5행부터 데이터를 읽습니다.</li>
+              <li>전체 충전기 수는 RAW C열 충전기 ID 기준입니다.</li>
+              <li>승인대기는 수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하입니다.</li>
+              <li>고장 산정은 파일명 기준 시각인 07:00 이전 수집값 또는 과다이상 기준입니다.</li>
+              <li>VOC 처리중은 완료자명과 완료자 소속이 모두 공백인 기준입니다.</li>
+              <li>장기 미조치는 VOC 조치 예정 중 판정 기준일 대비 14일 이상 경과 건입니다.</li>
+            </ul>
+          </div>
+          <div style={{ ...styles.panel, maxHeight: 220, overflowY: 'auto' }}>
+            <div style={styles.sectionTitle}>최근 반영 로그</div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              {logs.length === 0 ? (
+                <div style={{ color: COLORS.sub }}>아직 업로드된 파일이 없습니다.</div>
+              ) : (
+                logs.map((log, idx) => <div key={`${log}-${idx}`} style={styles.logItem}>{log}</div>)
+              )}
+            </div>
+          </div>
+        </div>
           </>
         )}
 

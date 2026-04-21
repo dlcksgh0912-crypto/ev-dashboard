@@ -103,6 +103,12 @@ const COLORS = {
   blueSoft: '#eaf2ff',
   yellow: '#f59e0b',
   yellowSoft: '#fff5e7',
+  orange: '#f97316',
+  orangeSoft: '#fff2e8',
+  darkGray: '#111827',
+  darkGraySoft: '#e5e7eb',
+  lightGray: '#cbd5e1',
+  lightGraySoft: '#f1f5f9',
   red: '#ef4444',
   redSoft: '#fff0f0',
   violet: '#7c3aed',
@@ -582,15 +588,15 @@ function statusMeta(type) {
     case '정상 운영':
       return { accent: COLORS.green, soft: COLORS.greenSoft, icon: 'normal' };
     case '고장 충전기':
-      return { accent: COLORS.red, soft: COLORS.redSoft, icon: 'fault' };
+      return { accent: COLORS.violet, soft: COLORS.violetSoft, icon: 'fault' };
     case 'VOC 조치 예정':
-      return { accent: COLORS.violet, soft: COLORS.violetSoft, icon: 'voc' };
+      return { accent: COLORS.red, soft: COLORS.redSoft, icon: 'voc' };
     case '미인입 고장':
-      return { accent: COLORS.yellow, soft: COLORS.yellowSoft, icon: 'uninbound' };
+      return { accent: COLORS.lightGray, soft: COLORS.lightGraySoft, icon: 'uninbound' };
     case '교체 예정':
-      return { accent: COLORS.yellow, soft: COLORS.yellowSoft, icon: 'replacement' };
+      return { accent: COLORS.orange, soft: COLORS.orangeSoft, icon: 'replacement' };
     case '임의 OFF':
-      return { accent: COLORS.text, soft: '#eef2f7', icon: 'off' };
+      return { accent: COLORS.darkGray, soft: COLORS.darkGraySoft, icon: 'off' };
     default:
       return { accent: COLORS.blue, soft: COLORS.blueSoft, icon: 'charger' };
   }
@@ -634,11 +640,11 @@ function StatCard({ title, value, sub }) {
 function LegendItem({ name, value, color }) {
   return (
     <div style={styles.legendItem}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
-        <div style={{ width: 10, height: 10, borderRadius: '50%', background: color, flexShrink: 0 }} />
-        <div style={{ whiteSpace: 'normal', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.4 }}>{name}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ width: 10, height: 10, borderRadius: '50%', background: color }} />
+        <div>{name}</div>
       </div>
-      <div style={{ fontWeight: 800, flexShrink: 0, paddingLeft: 16, minWidth: 78, textAlign: 'right' }}>{value}</div>
+      <div style={{ fontWeight: 800 }}>{value}</div>
     </div>
   );
 }
@@ -646,10 +652,10 @@ function LegendItem({ name, value, color }) {
 function DonutChart({ dashboard }) {
   const total = dashboard.faultCount;
   const data = [
-    { name: '임의 OFF', value: dashboard.manualOff, color: COLORS.text },
-    { name: 'VOC 조치 예정', value: dashboard.vocPending, color: COLORS.violet },
-    { name: '교체 예정', value: dashboard.replacement, color: COLORS.yellow },
-    { name: '미인입 고장', value: dashboard.uninbound, color: COLORS.yellow },
+    { name: '임의 OFF', value: dashboard.manualOff, color: COLORS.darkGray },
+    { name: 'VOC 조치 예정', value: dashboard.vocPending, color: COLORS.red },
+    { name: '교체 예정', value: dashboard.replacement, color: COLORS.orange },
+    { name: '미인입 고장', value: dashboard.uninbound, color: COLORS.lightGray },
   ];
 
   if (!total) {
@@ -1302,7 +1308,7 @@ export default function Dashboard() {
               <div style={styles.middleGrid}>
                 <StatCard title="교체 예정" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" />
                 <StatCard title="임의 OFF" value={`${dashboard.manualOff.toLocaleString()}기`} sub="충전기 중 충전상태 기준" />
-                <div style={{ ...styles.panel, overflow: 'visible' }}>
+                <div style={styles.panel}>
                   <div style={styles.sectionTitle}>고장 분류</div>
                   <DonutChart dashboard={dashboard} />
                 </div>
@@ -1682,9 +1688,8 @@ export default function Dashboard() {
 const styles = {
   page: {
     minHeight: '100vh',
-    width: '100%',
     background: 'linear-gradient(180deg, #eef2f7 0%, #e9eef5 100%)',
-    padding: 16,
+    padding: 20,
     color: COLORS.text,
     fontFamily: 'Arial, sans-serif',
     boxSizing: 'border-box',
@@ -1708,10 +1713,11 @@ const styles = {
   },
   appShell: {
     width: '100%',
-    minHeight: 'calc(100vh - 32px)',
-    margin: '0',
+    maxWidth: 1440,
+    minHeight: 'calc(100vh - 40px)',
+    margin: '0 auto',
     display: 'grid',
-    gridTemplateColumns: '220px minmax(0, 1fr)',
+    gridTemplateColumns: '196px minmax(0, 1fr)',
     background: 'rgba(255,255,255,0.42)',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 28,
@@ -1795,7 +1801,7 @@ const styles = {
     background: COLORS.panel,
     color: COLORS.slate,
     border: `1px solid ${COLORS.border}`,
-    padding: '12px 16px',
+    padding: '12px 14px',
     borderRadius: 14,
     fontWeight: 700,
     cursor: 'pointer',
@@ -1808,7 +1814,7 @@ const styles = {
     background: COLORS.blueSoft,
     border: `1px solid #dbe9ff`,
     borderRadius: 16,
-    padding: 8,
+    padding: 14,
     display: 'flex',
     alignItems: 'center',
     gap: 10,
@@ -1827,10 +1833,8 @@ const styles = {
   userMiniEmail: { fontSize: 12, color: COLORS.slate, wordBreak: 'break-all', lineHeight: 1.35 },
   userMiniRole: { fontSize: 13, color: COLORS.slate, marginTop: 4, fontWeight: 700 },
   mainArea: {
-    padding: 30,
+    padding: 28,
     minWidth: 0,
-    width: '100%',
-    boxSizing: 'border-box',
   },
   headerBox: {
     display: 'flex',
@@ -1904,28 +1908,21 @@ const styles = {
     fontWeight: 700,
   },
   cardGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 18, marginBottom: 18 },
-  middleGrid: {
-    display: 'grid',
-    gridTemplateColumns: '240px 240px minmax(980px, 1fr)',
-    gap: 18,
-    marginBottom: 18,
-    alignItems: 'stretch',
-  },
-  topGrid: { display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(320px, 1fr)', gap: 18, marginBottom: 18 },
+  middleGrid: { display: 'grid', gridTemplateColumns: '260px 260px 1fr', gap: 18, marginBottom: 18, alignItems: 'stretch' },
+  topGrid: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 18, marginBottom: 18 },
   panel: {
     background: COLORS.panel,
     border: `1px solid ${COLORS.border}`,
     borderRadius: 22,
     padding: 22,
     boxShadow: COLORS.shadow,
-    minWidth: 0,
   },
   card: {
     position: 'relative',
     background: COLORS.panel,
     borderRadius: 22,
     padding: 22,
-    minHeight: 140,
+    minHeight: 154,
     overflow: 'hidden',
   },
   cardTopRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 10 },
@@ -1951,18 +1948,12 @@ const styles = {
   sectionTitle: { fontSize: 17, fontWeight: 800, marginBottom: 16 },
   sectionTitleNoMargin: { fontSize: 17, fontWeight: 800 },
   sectionTitleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' },
-  donutLayout: {
-    display: 'grid',
-    gridTemplateColumns: '320px minmax(440px, 1fr)',
-    gap: 24,
-    alignItems: 'center',
-    minWidth: 0,
-  },
+  donutLayout: { display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, alignItems: 'center' },
   donutWrap: { display: 'flex', justifyContent: 'center', alignItems: 'center' },
-  donut: { width: 240, height: 240, borderRadius: '50%', display: 'flex', justifyContent: 'center', alignItems: 'center' },
+  donut: { width: 190, height: 190, borderRadius: '50%', display: 'flex', justifyContent: 'center', alignItems: 'center' },
   donutInner: {
-    width: 132,
-    height: 132,
+    width: 104,
+    height: 104,
     borderRadius: '50%',
     background: '#fff',
     display: 'flex',
@@ -1977,14 +1968,10 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 16,
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,
     borderRadius: 12,
-    padding: '13px 16px',
-    minWidth: 0,
-    width: '100%',
-    boxSizing: 'border-box',
+    padding: '12px 14px',
   },
   infoLargeBox: {
     display: 'flex',
@@ -2031,7 +2018,7 @@ const styles = {
     width: '100%',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 12,
-    padding: '12px 16px',
+    padding: '12px 14px',
     fontSize: 14,
     boxSizing: 'border-box',
     background: '#fff',
@@ -2041,7 +2028,7 @@ const styles = {
     width: '100%',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 12,
-    padding: '12px 16px',
+    padding: '12px 14px',
     fontSize: 14,
     boxSizing: 'border-box',
     background: '#fff',
@@ -2051,7 +2038,7 @@ const styles = {
     width: '100%',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 12,
-    padding: '12px 16px',
+    padding: '12px 14px',
     fontSize: 14,
     background: '#fff',
     outline: 'none',
@@ -2060,7 +2047,7 @@ const styles = {
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,
     borderRadius: 12,
-    padding: '12px 16px',
+    padding: '12px 14px',
     display: 'flex',
     alignItems: 'center',
   },

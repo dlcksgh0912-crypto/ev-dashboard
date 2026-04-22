@@ -195,6 +195,23 @@ function formatDate(date) {
   return `${y}-${m}-${d} ${hh}:${mm}`;
 }
 
+
+function shortAddress(value) {
+  const text = normalizeText(value);
+  if (!text) return '-';
+  return text.slice(0, 2);
+}
+
+function summarizeAfterContent(value) {
+  const text = normalizeText(value);
+  if (!text) return '-';
+
+  const match = text.match(/(\d{6}\s+\S+\s+\[[^\]]+\])/);
+  if (match) return match[1];
+
+  return text;
+}
+
 function extractCutoffFromFilename(fileName) {
   const name = fileName || '';
   const matches = name.match(/(20\d{2})(\d{2})(\d{2})|(\d{2})(\d{2})(\d{2})/g);
@@ -1013,7 +1030,7 @@ export default function Dashboard() {
     return mergedRows.filter((row) => {
       const matchesSearch =
         !searchText ||
-        [row.siteId, row.chargerId, row.siteName, row.address, row.detailAddress].some((value) =>
+        [row.chargerId, row.siteName, row.address].some((value) =>
           normalizeText(value).toLowerCase().includes(searchText.toLowerCase())
         );
 
@@ -1378,7 +1395,7 @@ export default function Dashboard() {
               <div style={styles.filterRowWide}>
                 <input
                   style={styles.inputNarrow}
-                  placeholder="충전소 ID / 충전기 ID / 충전소명 / 주소"
+                  placeholder="충전기 ID / 충전소명 / 주소"
                   value={searchText}
                   onChange={(e) => setSearchText(e.target.value)}
                 />
@@ -1408,35 +1425,31 @@ export default function Dashboard() {
                 <table style={styles.table}>
                   <thead>
                     <tr>
-                      <th style={{ width: '8%' }}>충전소 ID</th>
-                      <th style={{ width: '10%' }}>충전기 ID</th>
-                      <th style={{ width: '12%' }}>충전소명</th>
-                      <th style={{ width: '11%' }}>주소</th>
-                      <th style={{ width: '9%' }}>상세주소</th>
-                      <th style={{ width: '8%' }}>상태</th>
-                      <th style={{ width: '10%' }}>고장분류</th>
-                      <th style={{ width: '10%' }}>최근수집일</th>
-                      <th style={{ width: '10%' }}>재발생 여부</th>
-                      <th style={{ width: '10%' }}>장기 미조치</th>
-                      <th style={{ width: '10%' }}>과다이상</th>
-                      <th style={{ width: '12%' }}>이후 내용</th>
+                      <th style={{ width: '13%' }}>충전기 ID</th>
+                      <th style={{ width: '16%' }}>충전소명</th>
+                      <th style={{ width: '7%' }}>주소</th>
+                      <th style={{ width: '9%' }}>상태</th>
+                      <th style={{ width: '11%' }}>고장분류</th>
+                      <th style={{ width: '11%' }}>최근수집일</th>
+                      <th style={{ width: '9%' }}>재발생 여부</th>
+                      <th style={{ width: '9%' }}>장기 미조치</th>
+                      <th style={{ width: '7%' }}>과다이상</th>
+                      <th style={{ width: '18%' }}>이후 내용</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredRows.slice(0, 1000).map((row) => (
                       <tr key={`${row.chargerId}-${row.rowIndex}`}>
-                        <td>{row.siteId || '-'}</td>
                         <td>{row.chargerId}</td>
                         <td>{row.siteName || '-'}</td>
-                        <td>{row.address || '-'}</td>
-                        <td>{row.detailAddress || '-'}</td>
+                        <td>{shortAddress(row.address)}</td>
                         <td><StatusDot row={row} /></td>
                         <td>{row.faultType || '-'}</td>
                         <td>{row.collectedAtText}</td>
                         <td>{row.recurrenceLabel}</td>
                         <td>{row.isLongPending ? '장기 미조치' : '-'}</td>
                         <td>{row.isVocOverAbnormal ? '과다이상' : '-'}</td>
-                        <td>{row.latestCompletedContent || '-'}</td>
+                        <td title={row.latestCompletedContent || '-'}>{summarizeAfterContent(row.latestCompletedContent)}</td>
                       </tr>
                     ))}
                   </tbody>

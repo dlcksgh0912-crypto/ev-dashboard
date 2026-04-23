@@ -769,19 +769,57 @@ export default function Dashboard() {
     const email = String(user.email || '').toLowerCase();
     const adminFlagByEmail = isAdminEmail(email);
 
-    const { error: upsertError } = await supabase.from('profiles').upsert(
-      {
+    const { data: existingProfile, error: existingProfileError } = await supabase
+      .from('profiles')
+      .select('id, approved, is_admin, email')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (existingProfileError) {
+      console.error('기존 profiles 조회 실패:', existingProfileError);
+      pushLog('기존 사용자 프로필 조회 실패');
+    }
+
+    if (!existingProfile) {
+      const { error: insertError } = await supabase.from('profiles').insert({
         id: user.id,
         email,
         approved: adminFlagByEmail ? true : false,
         is_admin: adminFlagByEmail,
-      },
-      { onConflict: 'id' }
-    );
+      });
 
-    if (upsertError) {
-      console.error('profiles upsert 실패:', upsertError);
-      pushLog('사용자 프로필 저장 실패');
+      if (insertError) {
+        console.error('profiles insert 실패:', insertError);
+        pushLog('사용자 프로필 저장 실패');
+      }
+    } else if ((existingProfile.email || '').toLowerCase() !== email) {
+      const updatePayload = { email };
+      if (adminFlagByEmail && !existingProfile.is_admin) {
+        updatePayload.is_admin = true;
+      }
+      if (adminFlagByEmail && !existingProfile.approved) {
+        updatePayload.approved = true;
+      }
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update(updatePayload)
+        .eq('id', user.id);
+
+      if (updateError) {
+        console.error('profiles email 동기화 실패:', updateError);
+        pushLog('사용자 이메일 동기화 실패');
+      }
+    } else if (adminFlagByEmail && (!existingProfile.is_admin || !existingProfile.approved)) {
+      const { error: adminSyncError } = await supabase
+        .from('profiles')
+        .update({ is_admin: true, approved: true })
+        .eq('id', user.id);
+
+      if (adminSyncError) {
+        console.error('관리자 권한 동기화 실패:', adminSyncError);
+        pushLog('관리자 권한 동기화 실패');
+      }
     }
 
     const { data: profile, error: profileError } = await supabase

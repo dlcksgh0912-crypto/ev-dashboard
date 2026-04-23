@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
 import Dashboard from './Dashboard';
 
@@ -68,14 +68,101 @@ function IconCheck({ size = 18, color = LOGIN_COLORS.blue }) {
   );
 }
 
-function LoginScreen() {
+function getRecoveryRedirectUrl() {
+  if (typeof window === 'undefined') return undefined;
+  return window.location.origin;
+}
+
+function LoginScreen({ mode, setMode }) {
+  const isSignup = mode === 'signup';
+  const isForgot = mode === 'forgot';
+  const isReset = mode === 'reset';
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isSignup, setIsSignup] = useState(false);
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  const panelTitle = useMemo(() => {
+    if (isReset) return '비밀번호 재설정';
+    if (isForgot) return '비밀번호 찾기';
+    if (isSignup) return '회원가입';
+    return '로그인';
+  }, [isForgot, isReset, isSignup]);
+
+  const panelDesc = useMemo(() => {
+    if (isReset) return '새 비밀번호를 입력한 후 저장해주세요.';
+    if (isForgot) return '가입한 이메일을 입력하면 비밀번호 재설정 링크를 보내드립니다.';
+    if (isSignup) return '에버온 케어허브 계정을 등록하고 승인 후 이용하세요.';
+    return '승인된 계정으로 로그인하여 EverOn Care Hub에 접속하세요.';
+  }, [isForgot, isReset, isSignup]);
+
   const handleAuth = async () => {
+    if (isForgot) {
+      if (!email.trim()) {
+        alert('이메일을 입력해주세요.');
+        return;
+      }
+
+      setLoading(true);
+      try {
+        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: getRecoveryRedirectUrl(),
+        });
+
+        if (error) {
+          alert(error.message);
+          return;
+        }
+
+        alert('비밀번호 재설정 메일을 발송했습니다. 메일함에서 링크를 확인해주세요.');
+        setMode('login');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (isReset) {
+      if (!password.trim() || !confirmPassword.trim()) {
+        alert('새 비밀번호와 비밀번호 확인을 입력해주세요.');
+        return;
+      }
+
+      if (password !== confirmPassword) {
+        alert('비밀번호가 서로 다릅니다. 다시 확인해주세요.');
+        return;
+      }
+
+      if (password.length < 6) {
+        alert('비밀번호는 6자 이상으로 입력해주세요.');
+        return;
+      }
+
+      setLoading(true);
+      try {
+        const { error } = await supabase.auth.updateUser({ password });
+
+        if (error) {
+          alert(error.message);
+          return;
+        }
+
+        if (typeof window !== 'undefined') {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+        alert('비밀번호가 변경되었습니다. 새 비밀번호로 로그인해주세요.');
+        await supabase.auth.signOut();
+        setPassword('');
+        setConfirmPassword('');
+        setMode('login');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     if (!email.trim() || !password.trim()) {
       alert('이메일과 비밀번호를 입력해주세요.');
       return;
@@ -95,7 +182,7 @@ function LoginScreen() {
         }
 
         alert('회원가입이 완료되었습니다. 관리자 승인 후 로그인 가능합니다.');
-        setIsSignup(false);
+        setMode('login');
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
@@ -133,48 +220,86 @@ function LoginScreen() {
 
           <div style={loginStyles.loginBox}>
             <div style={loginStyles.titleBlock}>
-              <div style={loginStyles.loginTitle}>{isSignup ? '회원가입' : '로그인'}</div>
-              <div style={loginStyles.loginDesc}>
-                {isSignup
-                  ? '에버온 케어허브 계정을 등록하고 승인 후 이용하세요.'
-                  : '승인된 계정으로 로그인하여 EverOn Care Hub에 접속하세요.'}
+              <div style={loginStyles.loginTitle}>{panelTitle}</div>
+              <div style={loginStyles.loginDesc}>{panelDesc}</div>
+            </div>
+
+            {!isReset && (
+              <>
+                <div style={loginStyles.fieldLabel}>이메일</div>
+                <div style={loginStyles.inputShell}>
+                  <div style={loginStyles.inputIcon}><IconMail /></div>
+                  <input
+                    type="email"
+                    placeholder="이메일을 입력하세요"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    style={loginStyles.input}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAuth();
+                    }}
+                  />
+                </div>
+              </>
+            )}
+
+            {!isForgot && (
+              <>
+                <div style={loginStyles.fieldLabel}>{isReset ? '새 비밀번호' : '비밀번호'}</div>
+                <div style={loginStyles.inputShell}>
+                  <div style={loginStyles.inputIcon}><IconLock /></div>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder={isReset ? '새 비밀번호를 입력하세요' : '비밀번호를 입력하세요'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    style={loginStyles.input}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAuth();
+                    }}
+                  />
+                  <button
+                    type="button"
+                    style={loginStyles.eyeButton}
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    aria-label={showPassword ? '비밀번호 숨기기' : '비밀번호 보기'}
+                  >
+                    <IconEye off={showPassword} />
+                  </button>
+                </div>
+              </>
+            )}
+
+            {isReset && (
+              <>
+                <div style={loginStyles.fieldLabel}>비밀번호 확인</div>
+                <div style={loginStyles.inputShell}>
+                  <div style={loginStyles.inputIcon}><IconLock /></div>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="새 비밀번호를 다시 입력하세요"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    style={loginStyles.input}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleAuth();
+                    }}
+                  />
+                </div>
+              </>
+            )}
+
+            {!isSignup && !isForgot && !isReset && (
+              <div style={loginStyles.utilityRow}>
+                <button
+                  type="button"
+                  style={loginStyles.linkButton}
+                  onClick={() => setMode('forgot')}
+                >
+                  비밀번호 찾기
+                </button>
               </div>
-            </div>
-
-            <div style={loginStyles.fieldLabel}>이메일</div>
-            <div style={loginStyles.inputShell}>
-              <div style={loginStyles.inputIcon}><IconMail /></div>
-              <input
-                type="email"
-                placeholder="이메일을 입력하세요"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                style={loginStyles.input}
-              />
-            </div>
-
-            <div style={loginStyles.fieldLabel}>비밀번호</div>
-            <div style={loginStyles.inputShell}>
-              <div style={loginStyles.inputIcon}><IconLock /></div>
-              <input
-                type={showPassword ? 'text' : 'password'}
-                placeholder="비밀번호를 입력하세요"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                style={loginStyles.input}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleAuth();
-                }}
-              />
-              <button
-                type="button"
-                style={loginStyles.eyeButton}
-                onClick={() => setShowPassword((prev) => !prev)}
-                aria-label={showPassword ? '비밀번호 숨기기' : '비밀번호 보기'}
-              >
-                <IconEye off={showPassword} />
-              </button>
-            </div>
+            )}
 
             <button
               type="button"
@@ -186,7 +311,15 @@ function LoginScreen() {
               }}
               disabled={loading}
             >
-              {loading ? '처리 중...' : isSignup ? '회원가입' : '로그인'}
+              {loading
+                ? '처리 중...'
+                : isReset
+                  ? '새 비밀번호 저장'
+                  : isForgot
+                    ? '재설정 메일 보내기'
+                    : isSignup
+                      ? '회원가입'
+                      : '로그인'}
             </button>
 
             <div style={loginStyles.dividerRow}>
@@ -195,13 +328,37 @@ function LoginScreen() {
               <div style={loginStyles.dividerLine} />
             </div>
 
-            <button
-              type="button"
-              style={loginStyles.secondaryButton}
-              onClick={() => setIsSignup((prev) => !prev)}
-            >
-              {isSignup ? '로그인으로 전환' : '회원가입으로 전환'}
-            </button>
+            {isForgot ? (
+              <button
+                type="button"
+                style={loginStyles.secondaryButton}
+                onClick={() => setMode('login')}
+              >
+                로그인으로 돌아가기
+              </button>
+            ) : isReset ? (
+              <button
+                type="button"
+                style={loginStyles.secondaryButton}
+                onClick={async () => {
+                  if (typeof window !== 'undefined') {
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                  }
+                  await supabase.auth.signOut();
+                  setMode('login');
+                }}
+              >
+                재설정 취소
+              </button>
+            ) : (
+              <button
+                type="button"
+                style={loginStyles.secondaryButton}
+                onClick={() => setMode(isSignup ? 'login' : 'signup')}
+              >
+                {isSignup ? '로그인으로 전환' : '회원가입으로 전환'}
+              </button>
+            )}
           </div>
         </section>
 
@@ -230,6 +387,10 @@ function LoginScreen() {
               <div style={loginStyles.featureIcon}><IconCheck /></div>
               <div>승인 기반 보안 시스템</div>
             </div>
+            <div style={loginStyles.featureItem}>
+              <div style={loginStyles.featureIcon}><IconCheck /></div>
+              <div>비밀번호 재설정 셀프 처리</div>
+            </div>
           </div>
         </aside>
       </div>
@@ -239,18 +400,40 @@ function LoginScreen() {
 
 export default function App() {
   const [session, setSession] = useState(undefined);
+  const [authMode, setAuthMode] = useState('login');
 
   useEffect(() => {
     let isMounted = true;
 
+    const checkRecoveryMode = () => {
+      if (typeof window === 'undefined') return false;
+      const hash = window.location.hash || '';
+      const query = window.location.search || '';
+      return hash.includes('type=recovery') || query.includes('type=recovery');
+    };
+
     supabase.auth.getSession().then(({ data }) => {
+      const isRecovery = checkRecoveryMode();
+
       if (isMounted) {
         setSession(data.session ?? null);
+        if (isRecovery) {
+          setAuthMode('reset');
+        }
       }
     });
 
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession ?? null);
+
+      if (event === 'PASSWORD_RECOVERY') {
+        setAuthMode('reset');
+        return;
+      }
+
+      if (!nextSession) {
+        setAuthMode('login');
+      }
     });
 
     return () => {
@@ -267,8 +450,12 @@ export default function App() {
     );
   }
 
+  if (authMode === 'reset') {
+    return <LoginScreen mode={authMode} setMode={setAuthMode} />;
+  }
+
   if (!session) {
-    return <LoginScreen />;
+    return <LoginScreen mode={authMode} setMode={setAuthMode} />;
   }
 
   return <Dashboard />;
@@ -445,6 +632,20 @@ const loginStyles = {
     justifyContent: 'center',
     flexShrink: 0,
   },
+  utilityRow: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    marginTop: 12,
+  },
+  linkButton: {
+    border: 'none',
+    background: 'transparent',
+    color: '#2563eb',
+    fontWeight: 800,
+    fontSize: 15,
+    cursor: 'pointer',
+    padding: 0,
+  },
   primaryButton: {
     marginTop: 26,
     width: '100%',
@@ -518,30 +719,27 @@ const loginStyles = {
     lineHeight: 1.2,
   },
   infoAccent: {
-    width: 54,
-    height: 5,
+    width: 56,
+    height: 4,
     borderRadius: 999,
     background: '#2563eb',
-    marginBottom: 28,
+    marginBottom: 26,
   },
   featureList: {
     display: 'grid',
-    gap: 26,
+    gap: 18,
   },
   featureItem: {
     display: 'flex',
     alignItems: 'center',
-    gap: 14,
-    fontSize: 17,
-    color: '#334155',
+    gap: 12,
+    color: '#0f172a',
+    fontSize: 18,
     fontWeight: 700,
-    lineHeight: 1.5,
   },
   featureIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 999,
-    background: '#eaf2ff',
+    width: 20,
+    height: 20,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',

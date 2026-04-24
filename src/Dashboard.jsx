@@ -769,51 +769,43 @@ export default function Dashboard() {
     const email = String(user.email || '').toLowerCase();
     const adminFlagByEmail = isAdminEmail(email);
 
+    // 중요: 기존 profiles가 있으면 approved/is_admin 값을 절대 초기화하지 않음.
+    // 없을 때만 새로 생성하고, 관리자 이메일만 최초 생성 시 자동 승인/관리자로 처리.
     const { data: existingProfile, error: existingProfileError } = await supabase
       .from('profiles')
-      .select('id, approved, is_admin, email')
+      .select('id, email, approved, is_admin')
       .eq('id', user.id)
       .maybeSingle();
 
     if (existingProfileError) {
-      console.error('기존 profiles 조회 실패:', existingProfileError);
-      pushLog('기존 사용자 프로필 조회 실패');
+      console.error('기존 프로필 조회 실패:', existingProfileError);
+      pushLog('기존 프로필 조회 실패');
+      setApprovalChecked(true);
+      setIsRestoring(false);
+      return null;
     }
 
     if (!existingProfile) {
       const { error: insertError } = await supabase.from('profiles').insert({
         id: user.id,
         email,
-        approved: adminFlagByEmail ? true : false,
+        approved: adminFlagByEmail,
         is_admin: adminFlagByEmail,
       });
 
       if (insertError) {
         console.error('profiles insert 실패:', insertError);
-        pushLog('사용자 프로필 저장 실패');
+        pushLog('사용자 프로필 생성 실패');
+        setApprovalChecked(true);
+        setIsRestoring(false);
+        return null;
       }
-    } else if ((existingProfile.email || '').toLowerCase() !== email) {
-      const updatePayload = { email };
-      if (adminFlagByEmail && !existingProfile.is_admin) {
-        updatePayload.is_admin = true;
-      }
-      if (adminFlagByEmail && !existingProfile.approved) {
-        updatePayload.approved = true;
-      }
-
-      const { error: updateError } = await supabase
-        .from('profiles')
-        .update(updatePayload)
-        .eq('id', user.id);
-
-      if (updateError) {
-        console.error('profiles email 동기화 실패:', updateError);
-        pushLog('사용자 이메일 동기화 실패');
-      }
-    } else if (adminFlagByEmail && (!existingProfile.is_admin || !existingProfile.approved)) {
+    } else if (adminFlagByEmail && (!existingProfile.approved || !existingProfile.is_admin)) {
+      // 지정된 관리자 이메일은 실수로 권한이 풀려도 다시 관리자 권한만 복구.
+      // 일반 사용자 계정은 여기서 절대 false로 덮어쓰지 않음.
       const { error: adminSyncError } = await supabase
         .from('profiles')
-        .update({ is_admin: true, approved: true })
+        .update({ approved: true, is_admin: true, email })
         .eq('id', user.id);
 
       if (adminSyncError) {
@@ -874,29 +866,43 @@ export default function Dashboard() {
     }
   };
 
-  const approveUser = async (profileId) => {
-    const { error } = await supabase.from('profiles').update({ approved: true }).eq('id', profileId);
+  const updateUserApproval = async (profileId, approved) => {
+    const target = profiles.find((profile) => profile.id === profileId);
 
-    if (error) {
-      console.error('승인 처리 실패:', error);
-      alert(`승인 처리 실패: ${error.message}`);
+    if (target?.id === currentUser?.id && !approved) {
+      alert('본인 계정은 승인 해제할 수 없습니다.');
       return;
     }
 
-    pushLog('사용자 승인 완료');
+    const { error } = await supabase.from('profiles').update({ approved }).eq('id', profileId);
+
+    if (error) {
+      console.error('승인 상태 변경 실패:', error);
+      alert(`승인 상태 변경 실패: ${error.message}`);
+      return;
+    }
+
+    pushLog(approved ? '사용자 승인 완료' : '사용자 승인 해제 완료');
     fetchProfiles();
   };
 
-  const revokeUser = async (profileId) => {
-    const { error } = await supabase.from('profiles').update({ approved: false }).eq('id', profileId);
+  const updateUserRole = async (profileId, isAdminRole) => {
+    const target = profiles.find((profile) => profile.id === profileId);
 
-    if (error) {
-      console.error('승인 해제 실패:', error);
-      alert(`승인 해제 실패: ${error.message}`);
+    if (target?.id === currentUser?.id && !isAdminRole) {
+      alert('본인 계정의 관리자 권한은 해제할 수 없습니다.');
       return;
     }
 
-    pushLog('사용자 승인 해제 완료');
+    const { error } = await supabase.from('profiles').update({ is_admin: isAdminRole }).eq('id', profileId);
+
+    if (error) {
+      console.error('사용자 권한 변경 실패:', error);
+      alert(`사용자 권한 변경 실패: ${error.message}`);
+      return;
+    }
+
+    pushLog(isAdminRole ? '관리자 권한 부여 완료' : '일반 사용자로 변경 완료');
     fetchProfiles();
   };
 
@@ -909,7 +915,6 @@ export default function Dashboard() {
         const { data: savedFiles, error: filesError } = await supabase
           .from('uploaded_files')
           .select('*')
-          .eq('user_id', user.id)
           .in('file_type', ['raw', 'voc', 'replacement'])
           .order('created_at', { ascending: false });
 
@@ -990,6 +995,12 @@ export default function Dashboard() {
   }, [isAdmin]);
 
   const handleFiles = async (e) => {
+    if (!isAdmin) {
+      alert('파일 업로드는 관리자만 가능합니다.');
+      e.target.value = '';
+      return;
+    }
+
     const files = Array.from(e.target.files || []);
     for (const file of files) {
       try {
@@ -1311,10 +1322,12 @@ export default function Dashboard() {
               </div>
             </div>
             <div style={styles.headerActions}>
-              <label style={styles.primaryButton}>
-                <span style={styles.buttonInner}><IconUpload /> 파일 업로드</span>
-                <input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleFiles} style={{ display: 'none' }} />
-              </label>
+              {isAdmin && (
+                <label style={styles.primaryButton}>
+                  <span style={styles.buttonInner}><IconUpload /> 파일 업로드</span>
+                  <input type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleFiles} style={{ display: 'none' }} />
+                </label>
+              )}
               <button style={styles.outlineButton} onClick={() => supabase.auth.signOut()}>
                 <span style={styles.buttonInner}><IconLogout /> 로그아웃</span>
               </button>
@@ -1659,24 +1672,30 @@ export default function Dashboard() {
             <div style={styles.vocLayout}>
               <div style={styles.panel}>
                 <div style={styles.sectionTitleRow}>
-                  <div style={styles.sectionTitleNoMargin}>사용자 승인 관리</div>
+                  <div style={styles.sectionTitleNoMargin}>사용자 관리</div>
                   <button style={styles.secondaryButton} onClick={fetchProfiles}>
                     새로고침
                   </button>
                 </div>
 
                 <div style={{ color: COLORS.sub, fontSize: 13, marginBottom: 16 }}>
-                  회원가입한 사용자는 승인 전까지 로그인 후 사용이 제한됩니다.
+                  회원가입 후 로그인 이력이 있는 사용자를 기준으로 표시됩니다. 관리자는 파일 업로드와 계정 승인이 가능하고, 일반 사용자는 조회와 검색만 가능합니다.
                 </div>
 
-                <div style={styles.summaryGrid2}>
+                <div style={styles.summaryGrid3}>
+                  <div style={styles.summaryBox}>전체 사용자 <strong>{profiles.length}명</strong></div>
                   <div style={styles.summaryBox}>승인 완료 <strong>{profiles.filter((p) => p.approved).length}명</strong></div>
                   <div style={styles.summaryBox}>승인 대기 <strong>{profiles.filter((p) => !p.approved).length}명</strong></div>
+                </div>
+
+                <div style={{ ...styles.summaryGrid2, marginTop: 12 }}>
+                  <div style={styles.summaryBox}>관리자 <strong>{profiles.filter((p) => p.is_admin).length}명</strong></div>
+                  <div style={styles.summaryBox}>일반 사용자 <strong>{profiles.filter((p) => !p.is_admin).length}명</strong></div>
                 </div>
               </div>
 
               <div style={styles.panel}>
-                <div style={styles.sectionTitle}>사용자 목록</div>
+                <div style={styles.sectionTitle}>회원가입 사용자 목록</div>
                 {profilesLoading ? (
                   <div style={{ color: COLORS.sub }}>사용자 목록을 불러오는 중입니다...</div>
                 ) : (
@@ -1684,40 +1703,53 @@ export default function Dashboard() {
                     <table style={styles.table}>
                       <thead>
                         <tr>
-                          <th style={{ width: '30%' }}>이메일</th>
-                          <th style={{ width: '15%' }}>승인여부</th>
-                          <th style={{ width: '15%' }}>관리자</th>
-                          <th style={{ width: '20%' }}>생성일시</th>
-                          <th style={{ width: '20%' }}>관리</th>
+                          <th style={{ width: '32%' }}>이메일</th>
+                          <th style={{ width: '16%' }}>승인 여부</th>
+                          <th style={{ width: '18%' }}>권한</th>
+                          <th style={{ width: '18%' }}>생성일시</th>
+                          <th style={{ width: '16%' }}>현재 상태</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {profiles.map((profile) => (
-                          <tr key={profile.id}>
-                            <td>{profile.email || '-'}</td>
-                            <td>{profile.approved ? '승인 완료' : '승인 대기'}</td>
-                            <td>{profile.is_admin ? '관리자' : '-'}</td>
-                            <td>{profile.created_at ? formatDate(new Date(profile.created_at)) : '-'}</td>
-                            <td>
-                              <div style={styles.actionButtonWrap}>
-                                {!profile.approved ? (
-                                  <button style={styles.approveButton} onClick={() => approveUser(profile.id)}>
-                                    승인
-                                  </button>
-                                ) : (
-                                  <button
-                                    style={styles.revokeButton}
-                                    onClick={() => revokeUser(profile.id)}
-                                    disabled={profile.email === currentUser?.email}
-                                    title={profile.email === currentUser?.email ? '본인 계정은 승인 해제 불가' : ''}
-                                  >
-                                    승인 해제
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                        {profiles.map((profile) => {
+                          const isSelf = profile.id === currentUser?.id;
+                          return (
+                            <tr key={profile.id}>
+                              <td>
+                                <div style={{ fontWeight: 700 }}>{profile.email || '-'}</div>
+                                {isSelf && <div style={{ color: COLORS.blue, fontSize: 12, marginTop: 4 }}>현재 로그인 계정</div>}
+                              </td>
+                              <td>
+                                <label style={styles.checkControl}>
+                                  <input
+                                    type="checkbox"
+                                    checked={!!profile.approved}
+                                    disabled={isSelf}
+                                    onChange={(event) => updateUserApproval(profile.id, event.target.checked)}
+                                  />
+                                  <span>{profile.approved ? '승인 완료' : '승인 대기'}</span>
+                                </label>
+                              </td>
+                              <td>
+                                <label style={styles.checkControl}>
+                                  <input
+                                    type="checkbox"
+                                    checked={!!profile.is_admin}
+                                    disabled={isSelf}
+                                    onChange={(event) => updateUserRole(profile.id, event.target.checked)}
+                                  />
+                                  <span>{profile.is_admin ? '관리자' : '일반 사용자'}</span>
+                                </label>
+                              </td>
+                              <td>{profile.created_at ? formatDate(new Date(profile.created_at)) : '-'}</td>
+                              <td>
+                                <span style={profile.approved ? styles.statusBadgeGreen : styles.statusBadgeYellow}>
+                                  {profile.approved ? '사용 가능' : '승인 필요'}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
                         {profiles.length === 0 && (
                           <tr>
                             <td colSpan="5">등록된 사용자가 없습니다.</td>
@@ -1729,8 +1761,7 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
-          )}
-        </main>
+          )}        </main>
       </div>
     </div>
   );
@@ -2046,6 +2077,10 @@ const styles = {
   },
   infoLargeText: { color: COLORS.slate, fontSize: 16 },
   summaryGrid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
+  summaryGrid3: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 },
+  checkControl: { display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: 700, color: COLORS.text, cursor: 'pointer' },
+  statusBadgeGreen: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 72, padding: '6px 10px', borderRadius: 999, background: COLORS.greenSoft, color: '#15803d', fontSize: 12, fontWeight: 800 },
+  statusBadgeYellow: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 72, padding: '6px 10px', borderRadius: 999, background: COLORS.yellowSoft, color: '#b45309', fontSize: 12, fontWeight: 800 },
   summaryBox: {
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,

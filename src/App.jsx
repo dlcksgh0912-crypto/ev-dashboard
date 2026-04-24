@@ -389,7 +389,7 @@ function LoginScreen({ mode, setMode }) {
             </div>
             <div style={loginStyles.featureItem}>
               <div style={loginStyles.featureIcon}><IconCheck /></div>
-              <div>비밀번호 재설정 셀프 처리</div>
+              <div>협력업체 출동 및 자재 이력 관리</div>
             </div>
           </div>
         </aside>

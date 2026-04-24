@@ -621,9 +621,9 @@ function statusMeta(type) {
 }
 
 function StatusDot({ row }) {
-  if (row.isFault) return <span style={{ color: COLORS.red, fontWeight: 800 }}>● 고장</span>;
-  if (row.isApprovalPending) return <span style={{ color: COLORS.yellow, fontWeight: 800 }}>● 승인대기</span>;
-  return <span style={{ color: COLORS.blue, fontWeight: 800 }}>● 정상 운영</span>;
+  if (row.isFault) return <span style={{ ...styles.statusNowrap, color: COLORS.red }}>● 고장</span>;
+  if (row.isApprovalPending) return <span style={{ ...styles.statusNowrap, color: COLORS.yellow }}>● 승인대기</span>;
+  return <span style={{ ...styles.statusNowrap, color: COLORS.blue }}>● 정상 운영</span>;
 }
 
 function SearchStatusTag({ row }) {
@@ -1353,8 +1353,8 @@ export default function Dashboard() {
   return (
     <div style={styles.page}>
       <style>{`
-        table th { background: #f8fbff; color: #50627d; font-weight: 900; text-align: left; padding: 13px 14px; border-bottom: 1px solid #e6edf5; }
-        table td { padding: 13px 14px; border-bottom: 1px solid #eef2f7; color: #0f172a; vertical-align: middle; }
+        table th { background: #f8fbff; color: #50627d; font-weight: 900; text-align: left; padding: 12px 12px; border-bottom: 1px solid #e6edf5; white-space: nowrap; }
+        table td { padding: 12px 12px; border-bottom: 1px solid #eef2f7; color: #0f172a; vertical-align: middle; line-height: 1.45; }
         table tbody tr:hover { background: #f8fbff; }
       `}</style>
       <div style={styles.appShell}>
@@ -1566,16 +1566,16 @@ export default function Dashboard() {
                 <table style={styles.table}>
                   <thead>
                     <tr>
-                      <th style={{ width: '13%' }}>충전기 ID</th>
-                      <th style={{ width: '16%' }}>충전소명</th>
-                      <th style={{ width: '7%' }}>주소</th>
-                      <th style={{ width: '9%' }}>상태</th>
-                      <th style={{ width: '11%' }}>고장분류</th>
-                      <th style={{ width: '11%' }}>최근수집일</th>
-                      <th style={{ width: '9%' }}>재발생 여부</th>
-                      <th style={{ width: '9%' }}>장기 미조치</th>
+                      <th style={{ width: '12%' }}>충전기 ID</th>
+                      <th style={{ width: '13%' }}>충전소명</th>
+                      <th style={{ width: '6%' }}>주소</th>
+                      <th style={{ width: '11%' }}>상태</th>
+                      <th style={{ width: '10%' }}>고장분류</th>
+                      <th style={{ width: '10%' }}>최근수집일</th>
+                      <th style={{ width: '11%' }}>재발생 여부</th>
+                      <th style={{ width: '11%' }}>장기 미조치</th>
                       <th style={{ width: '7%' }}>과다이상</th>
-                      <th style={{ width: '18%' }}>이후 내용</th>
+                      <th style={{ width: '19%' }}>이후 내용</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1584,11 +1584,11 @@ export default function Dashboard() {
                         <td>{row.chargerId}</td>
                         <td>{row.siteName || '-'}</td>
                         <td>{shortAddress(row.address)}</td>
-                        <td><StatusDot row={row} /></td>
+                        <td style={styles.statusCell}><StatusDot row={row} /></td>
                         <td>{row.faultType || '-'}</td>
                         <td>{row.collectedAtText}</td>
-                        <td>{row.recurrenceLabel}</td>
-                        <td>{row.isLongPending ? '장기 미조치' : '-'}</td>
+                        <td style={styles.nowrapCell}>{row.recurrenceLabel}</td>
+                        <td style={styles.nowrapCell}>{row.isLongPending ? '장기 미조치' : '-'}</td>
                         <td>{row.isVocOverAbnormal ? '과다이상' : '-'}</td>
                         <td title={row.latestCompletedContent || '-'}>{summarizeAfterContent(row.latestCompletedContent)}</td>
                       </tr>
@@ -2294,7 +2294,10 @@ const styles = {
     alignItems: 'center',
   },
   tableWrap: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 16 },
-  table: { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 14 },
+  table: { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 13 },
+  statusCell: { whiteSpace: 'nowrap', minWidth: 92 },
+  statusNowrap: { display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap', fontWeight: 900, fontSize: 13 },
+  nowrapCell: { whiteSpace: 'nowrap', fontSize: 13 },
   searchGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 },
   searchCard: {
     border: `1px solid ${COLORS.border}`,

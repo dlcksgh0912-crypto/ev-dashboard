@@ -351,6 +351,7 @@ function mapVocColumns(headerRow) {
 function parseVocFile(rows) {
   const headerRow = rows[0] || [];
   const col = mapVocColumns(headerRow);
+  if (col.receivedAt < 0) col.receivedAt = 1; // VOC B열 접수일시 fallback
 
   return rows
     .slice(1)
@@ -740,9 +741,11 @@ export default function Dashboard() {
   const [faultFilter, setFaultFilter] = useState('all');
   const [recurrenceFilter, setRecurrenceFilter] = useState('all');
   const [longPendingFilter, setLongPendingFilter] = useState('all');
-  const [orgFilter, setOrgFilter] = useState('all');
+  const [orgFilter, setOrgFilter] = useState('EV세상');
   const [vocPartStartDate, setVocPartStartDate] = useState('');
   const [vocPartEndDate, setVocPartEndDate] = useState('');
+  const [vocPerformanceStartDate, setVocPerformanceStartDate] = useState('');
+  const [vocPerformanceEndDate, setVocPerformanceEndDate] = useState('');
   const [isRestoring, setIsRestoring] = useState(true);
 
   const [profiles, setProfiles] = useState([]);
@@ -769,43 +772,51 @@ export default function Dashboard() {
     const email = String(user.email || '').toLowerCase();
     const adminFlagByEmail = isAdminEmail(email);
 
-    // 중요: 기존 profiles가 있으면 approved/is_admin 값을 절대 초기화하지 않음.
-    // 없을 때만 새로 생성하고, 관리자 이메일만 최초 생성 시 자동 승인/관리자로 처리.
     const { data: existingProfile, error: existingProfileError } = await supabase
       .from('profiles')
-      .select('id, email, approved, is_admin')
+      .select('id, approved, is_admin, email')
       .eq('id', user.id)
       .maybeSingle();
 
     if (existingProfileError) {
-      console.error('기존 프로필 조회 실패:', existingProfileError);
-      pushLog('기존 프로필 조회 실패');
-      setApprovalChecked(true);
-      setIsRestoring(false);
-      return null;
+      console.error('기존 profiles 조회 실패:', existingProfileError);
+      pushLog('기존 사용자 프로필 조회 실패');
     }
 
     if (!existingProfile) {
       const { error: insertError } = await supabase.from('profiles').insert({
         id: user.id,
         email,
-        approved: adminFlagByEmail,
+        approved: adminFlagByEmail ? true : false,
         is_admin: adminFlagByEmail,
       });
 
       if (insertError) {
         console.error('profiles insert 실패:', insertError);
-        pushLog('사용자 프로필 생성 실패');
-        setApprovalChecked(true);
-        setIsRestoring(false);
-        return null;
+        pushLog('사용자 프로필 저장 실패');
       }
-    } else if (adminFlagByEmail && (!existingProfile.approved || !existingProfile.is_admin)) {
-      // 지정된 관리자 이메일은 실수로 권한이 풀려도 다시 관리자 권한만 복구.
-      // 일반 사용자 계정은 여기서 절대 false로 덮어쓰지 않음.
+    } else if ((existingProfile.email || '').toLowerCase() !== email) {
+      const updatePayload = { email };
+      if (adminFlagByEmail && !existingProfile.is_admin) {
+        updatePayload.is_admin = true;
+      }
+      if (adminFlagByEmail && !existingProfile.approved) {
+        updatePayload.approved = true;
+      }
+
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update(updatePayload)
+        .eq('id', user.id);
+
+      if (updateError) {
+        console.error('profiles email 동기화 실패:', updateError);
+        pushLog('사용자 이메일 동기화 실패');
+      }
+    } else if (adminFlagByEmail && (!existingProfile.is_admin || !existingProfile.approved)) {
       const { error: adminSyncError } = await supabase
         .from('profiles')
-        .update({ approved: true, is_admin: true, email })
+        .update({ is_admin: true, approved: true })
         .eq('id', user.id);
 
       if (adminSyncError) {
@@ -866,43 +877,50 @@ export default function Dashboard() {
     }
   };
 
-  const updateUserApproval = async (profileId, approved) => {
-    const target = profiles.find((profile) => profile.id === profileId);
-
-    if (target?.id === currentUser?.id && !approved) {
-      alert('본인 계정은 승인 해제할 수 없습니다.');
-      return;
-    }
-
-    const { error } = await supabase.from('profiles').update({ approved }).eq('id', profileId);
+  const approveUser = async (profileId) => {
+    const { error } = await supabase.from('profiles').update({ approved: true }).eq('id', profileId);
 
     if (error) {
-      console.error('승인 상태 변경 실패:', error);
-      alert(`승인 상태 변경 실패: ${error.message}`);
+      console.error('승인 처리 실패:', error);
+      alert(`승인 처리 실패: ${error.message}`);
       return;
     }
 
-    pushLog(approved ? '사용자 승인 완료' : '사용자 승인 해제 완료');
+    pushLog('사용자 승인 완료');
     fetchProfiles();
   };
 
-  const updateUserRole = async (profileId, isAdminRole) => {
-    const target = profiles.find((profile) => profile.id === profileId);
-
-    if (target?.id === currentUser?.id && !isAdminRole) {
-      alert('본인 계정의 관리자 권한은 해제할 수 없습니다.');
-      return;
-    }
-
-    const { error } = await supabase.from('profiles').update({ is_admin: isAdminRole }).eq('id', profileId);
+  const revokeUser = async (profileId) => {
+    const { error } = await supabase.from('profiles').update({ approved: false }).eq('id', profileId);
 
     if (error) {
-      console.error('사용자 권한 변경 실패:', error);
-      alert(`사용자 권한 변경 실패: ${error.message}`);
+      console.error('승인 해제 실패:', error);
+      alert(`승인 해제 실패: ${error.message}`);
       return;
     }
 
-    pushLog(isAdminRole ? '관리자 권한 부여 완료' : '일반 사용자로 변경 완료');
+    pushLog('사용자 승인 해제 완료');
+    fetchProfiles();
+  };
+
+  const toggleAdminRole = async (profileId, nextIsAdmin, targetEmail) => {
+    if (targetEmail === currentUser?.email && !nextIsAdmin) {
+      alert('본인 계정은 관리자 권한을 해제할 수 없습니다.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('profiles')
+      .update({ is_admin: nextIsAdmin })
+      .eq('id', profileId);
+
+    if (error) {
+      console.error('관리자 권한 변경 실패:', error);
+      alert(`관리자 권한 변경 실패: ${error.message}`);
+      return;
+    }
+
+    pushLog(nextIsAdmin ? '관리자 권한 부여 완료' : '일반 사용자 전환 완료');
     fetchProfiles();
   };
 
@@ -995,12 +1013,6 @@ export default function Dashboard() {
   }, [isAdmin]);
 
   const handleFiles = async (e) => {
-    if (!isAdmin) {
-      alert('파일 업로드는 관리자만 가능합니다.');
-      e.target.value = '';
-      return;
-    }
-
     const files = Array.from(e.target.files || []);
     for (const file of files) {
       try {
@@ -1129,6 +1141,77 @@ export default function Dashboard() {
     return Array.from(map.values()).sort((a, b) => b.completed + b.pending - (a.completed + a.pending));
   }, [vocRows, orgFilter]);
 
+  const vocPerformanceRange = useMemo(() => {
+    const start = vocPerformanceStartDate ? new Date(`${vocPerformanceStartDate}T00:00:00`) : null;
+    const end = vocPerformanceEndDate ? new Date(`${vocPerformanceEndDate}T23:59:59`) : null;
+    return { start, end };
+  }, [vocPerformanceStartDate, vocPerformanceEndDate]);
+
+  const isInVocPerformanceRange = (date) => {
+    if (!date) return false;
+    if (vocPerformanceRange.start && date < vocPerformanceRange.start) return false;
+    if (vocPerformanceRange.end && date > vocPerformanceRange.end) return false;
+    return true;
+  };
+
+  const vocPerformanceStats = useMemo(() => {
+    const map = new Map();
+    const ensure = (org, name) => {
+      const safeOrg = org || '미지정';
+      const safeName = name || '(미기재)';
+      const key = `${safeOrg}__${safeName}`;
+      if (!map.has(key)) {
+        map.set(key, { org: safeOrg, name: safeName, received: 0, completed: 0, pending: 0 });
+      }
+      return map.get(key);
+    };
+
+    for (const row of vocRows) {
+      const completedOrg = row.completedOrg || '';
+      const completedName = row.completedName || '';
+      const pendingOrg = row.pendingDisplayOrg || row.progressOrg || '';
+      const pendingName = row.pendingDisplayName || row.progressName || '';
+      const displayOrg = row.isCompleted ? completedOrg : pendingOrg;
+      const displayName = row.isCompleted ? completedName : pendingName;
+
+      if (row.receivedAt && isInVocPerformanceRange(row.receivedAt)) {
+        if (orgFilter === 'all' || displayOrg === orgFilter) {
+          ensure(displayOrg, displayName).received += 1;
+        }
+      }
+
+      if (row.isCompleted && row.completedAt && isInVocPerformanceRange(row.completedAt)) {
+        if (orgFilter === 'all' || completedOrg === orgFilter) {
+          ensure(completedOrg, completedName).completed += 1;
+        }
+      }
+
+      if (row.isPending && row.receivedAt && isInVocPerformanceRange(row.receivedAt)) {
+        if (orgFilter === 'all' || pendingOrg === orgFilter) {
+          ensure(pendingOrg, pendingName).pending += 1;
+        }
+      }
+    }
+
+    return Array.from(map.values())
+      .map((row) => {
+        const denominator = row.completed + row.pending;
+        const completionRate = denominator > 0 ? Math.round((row.completed / denominator) * 1000) / 10 : 0;
+        return { ...row, completionRate };
+      })
+      .filter((row) => row.received > 0 || row.completed > 0 || row.pending > 0)
+      .sort((a, b) => b.completed + b.pending + b.received - (a.completed + a.pending + a.received));
+  }, [vocRows, orgFilter, vocPerformanceRange]);
+
+  const vocPerformanceSummary = useMemo(() => {
+    const totalReceived = vocPerformanceStats.reduce((sum, row) => sum + row.received, 0);
+    const totalCompleted = vocPerformanceStats.reduce((sum, row) => sum + row.completed, 0);
+    const totalPending = vocPerformanceStats.reduce((sum, row) => sum + row.pending, 0);
+    const denominator = totalCompleted + totalPending;
+    const completionRate = denominator > 0 ? Math.round((totalCompleted / denominator) * 1000) / 10 : 0;
+    return { totalReceived, totalCompleted, totalPending, completionRate };
+  }, [vocPerformanceStats]);
+
   const vocDateFilteredRows = useMemo(() => {
     const start = vocPartStartDate ? new Date(`${vocPartStartDate}T00:00:00`) : null;
     const end = vocPartEndDate ? new Date(`${vocPartEndDate}T23:59:59`) : null;
@@ -1233,9 +1316,11 @@ export default function Dashboard() {
     setFaultFilter('all');
     setRecurrenceFilter('all');
     setLongPendingFilter('all');
-    setOrgFilter('all');
+    setOrgFilter('EV세상');
     setVocPartStartDate('');
     setVocPartEndDate('');
+    setVocPerformanceStartDate('');
+    setVocPerformanceEndDate('');
   };
 
   const navItems = [
@@ -1267,6 +1352,11 @@ export default function Dashboard() {
 
   return (
     <div style={styles.page}>
+      <style>{`
+        table th { background: #f8fbff; color: #50627d; font-weight: 900; text-align: left; padding: 13px 14px; border-bottom: 1px solid #e6edf5; }
+        table td { padding: 13px 14px; border-bottom: 1px solid #eef2f7; color: #0f172a; vertical-align: middle; }
+        table tbody tr:hover { background: #f8fbff; }
+      `}</style>
       <div style={styles.appShell}>
         <aside style={styles.sidebar}>
           <div>
@@ -1559,46 +1649,81 @@ export default function Dashboard() {
 
           {tab === 'voc' && (
             <div style={styles.vocLayout}>
-              <div style={styles.panel}>
-                <div style={styles.sectionTitle}>VOC 현황</div>
-                <div style={styles.summaryGrid2}>
-                  <div style={styles.summaryBox}>EV세상 진행중 <strong>{dashboard.evPending.toLocaleString()}건</strong></div>
-                  <div style={styles.summaryBox}>EV세상 완료 <strong>{dashboard.evCompleted.toLocaleString()}건</strong></div>
+              <div style={styles.vocHeroPanel}>
+                <div style={styles.vocHeroTop}>
+                  <div>
+                    <div style={styles.vocEyebrow}>VOC PERFORMANCE</div>
+                    <div style={styles.vocHeroTitle}>기간별 VOC 처리 현황</div>
+                    <div style={styles.vocHeroSub}>접수일시(B열)와 완료일시(R열)를 기준으로 인원별 실적을 확인합니다.</div>
+                  </div>
+                  <div style={styles.vocDateBox}>
+                    <input type="date" style={styles.vocDateInput} value={vocPerformanceStartDate} onChange={(e) => setVocPerformanceStartDate(e.target.value)} />
+                    <span style={styles.vocDateDivider}>~</span>
+                    <input type="date" style={styles.vocDateInput} value={vocPerformanceEndDate} onChange={(e) => setVocPerformanceEndDate(e.target.value)} />
+                  </div>
+                </div>
+
+                <div style={styles.vocKpiGrid}>
+                  <VocKpiCard label="총 접수" value={`${vocPerformanceSummary.totalReceived.toLocaleString()}건`} hint="B열 접수일시 기준" color={COLORS.blue} bg={COLORS.blueSoft} />
+                  <VocKpiCard label="완료" value={`${vocPerformanceSummary.totalCompleted.toLocaleString()}건`} hint="R열 완료일시 기준" color={COLORS.green} bg={COLORS.greenSoft} />
+                  <VocKpiCard label="진행중" value={`${vocPerformanceSummary.totalPending.toLocaleString()}건`} hint="접수 기간 내 완료일시 공백" color={COLORS.orange} bg={COLORS.orangeSoft} />
+                  <VocKpiCard label="완료율" value={`${vocPerformanceSummary.completionRate}%`} hint="완료 / (완료 + 진행중)" color={COLORS.violet} bg={COLORS.violetSoft} />
                 </div>
               </div>
 
               <div style={styles.panel}>
-                <div style={styles.sectionTitle}>건수 현황</div>
-                <select
-                  style={{ ...styles.select, marginBottom: 16, maxWidth: 220 }}
-                  value={orgFilter}
-                  onChange={(e) => setOrgFilter(e.target.value)}
-                >
-                  <option value="all">전체</option>
-                  <option value="상담사">상담사</option>
-                  <option value="EV세상">EV세상</option>
-                </select>
-                <div style={styles.tableWrap}>
-                  <table style={styles.table}>
+                <div style={styles.sectionTitleRow}>
+                  <div>
+                    <div style={styles.sectionTitleNoMargin}>인원별 VOC 처리 현황</div>
+                    <div style={styles.sectionSubText}>기간을 선택하지 않으면 전체 VOC 데이터 기준으로 표시합니다.</div>
+                  </div>
+                  <div style={styles.fixedOrgBadge}>EV세상 기준</div>
+                </div>
+                <div style={styles.tableWrapModern}>
+                  <table style={styles.tableModern}>
                     <thead>
                       <tr>
+                        <th>순위</th>
                         <th>소속</th>
                         <th>이름</th>
-                        <th>완료건</th>
-                        <th>진행중건</th>
+                        <th>총 접수</th>
+                        <th>완료</th>
+                        <th>진행중</th>
+                        <th>완료율</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {vocStats.map((row) => (
-                        <tr key={`${row.org}-${row.name}`}>
-                          <td>{row.org}</td>
-                          <td>{row.name}</td>
-                          <td>{row.completed.toLocaleString()}건</td>
-                          <td>{row.pending.toLocaleString()}건</td>
+                      {vocPerformanceStats.map((row, idx) => (
+                        <tr key={`${row.org}-${row.name}-period`}>
+                          <td><span style={idx < 3 ? styles.rankBadgeTop : styles.rankBadge}>{idx + 1}</span></td>
+                          <td><span style={styles.orgBadge}>{row.org}</span></td>
+                          <td style={{ fontWeight: 800 }}>{idx === 0 ? '🥇 ' : idx === 1 ? '🥈 ' : idx === 2 ? '🥉 ' : ''}{row.name}</td>
+                          <td>{row.received.toLocaleString()}건</td>
+                          <td><span style={styles.completeBadge}>{row.completed.toLocaleString()}건</span></td>
+                          <td><span style={styles.pendingBadge}>{row.pending.toLocaleString()}건</span></td>
+                          <td>
+                            <div style={styles.rateCell}>
+                              <div style={styles.rateTrack}><div style={{ ...styles.rateFill, width: `${Math.min(row.completionRate, 100)}%` }} /></div>
+                              <strong>{row.completionRate}%</strong>
+                            </div>
+                          </td>
                         </tr>
                       ))}
+                      {vocPerformanceStats.length === 0 && (
+                        <tr>
+                          <td colSpan="7" style={{ color: COLORS.sub, textAlign: 'center', padding: 24 }}>선택한 기간의 VOC 처리 데이터가 없습니다.</td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
+                </div>
+              </div>
+
+              <div style={styles.panel}>
+                <div style={styles.sectionTitle}>기존 VOC 요약</div>
+                <div style={styles.summaryGrid2}>
+                  <div style={styles.summaryBox}>EV세상 진행중 <strong>{dashboard.evPending.toLocaleString()}건</strong></div>
+                  <div style={styles.summaryBox}>EV세상 완료 <strong>{dashboard.evCompleted.toLocaleString()}건</strong></div>
                 </div>
               </div>
 
@@ -1672,30 +1797,26 @@ export default function Dashboard() {
             <div style={styles.vocLayout}>
               <div style={styles.panel}>
                 <div style={styles.sectionTitleRow}>
-                  <div style={styles.sectionTitleNoMargin}>사용자 관리</div>
+                  <div style={styles.sectionTitleNoMargin}>사용자 승인 관리</div>
                   <button style={styles.secondaryButton} onClick={fetchProfiles}>
                     새로고침
                   </button>
                 </div>
 
                 <div style={{ color: COLORS.sub, fontSize: 13, marginBottom: 16 }}>
-                  회원가입 후 로그인 이력이 있는 사용자를 기준으로 표시됩니다. 관리자는 파일 업로드와 계정 승인이 가능하고, 일반 사용자는 조회와 검색만 가능합니다.
+                  회원가입한 사용자는 승인 전까지 로그인 후 사용이 제한됩니다.
                 </div>
 
-                <div style={styles.summaryGrid3}>
+                <div style={styles.summaryGrid4}>
                   <div style={styles.summaryBox}>전체 사용자 <strong>{profiles.length}명</strong></div>
                   <div style={styles.summaryBox}>승인 완료 <strong>{profiles.filter((p) => p.approved).length}명</strong></div>
                   <div style={styles.summaryBox}>승인 대기 <strong>{profiles.filter((p) => !p.approved).length}명</strong></div>
-                </div>
-
-                <div style={{ ...styles.summaryGrid2, marginTop: 12 }}>
                   <div style={styles.summaryBox}>관리자 <strong>{profiles.filter((p) => p.is_admin).length}명</strong></div>
-                  <div style={styles.summaryBox}>일반 사용자 <strong>{profiles.filter((p) => !p.is_admin).length}명</strong></div>
                 </div>
               </div>
 
               <div style={styles.panel}>
-                <div style={styles.sectionTitle}>회원가입 사용자 목록</div>
+                <div style={styles.sectionTitle}>사용자 목록</div>
                 {profilesLoading ? (
                   <div style={{ color: COLORS.sub }}>사용자 목록을 불러오는 중입니다...</div>
                 ) : (
@@ -1703,53 +1824,58 @@ export default function Dashboard() {
                     <table style={styles.table}>
                       <thead>
                         <tr>
-                          <th style={{ width: '32%' }}>이메일</th>
-                          <th style={{ width: '16%' }}>승인 여부</th>
-                          <th style={{ width: '18%' }}>권한</th>
-                          <th style={{ width: '18%' }}>생성일시</th>
-                          <th style={{ width: '16%' }}>현재 상태</th>
+                          <th style={{ width: '30%' }}>이메일</th>
+                          <th style={{ width: '15%' }}>승인여부</th>
+                          <th style={{ width: '15%' }}>관리자</th>
+                          <th style={{ width: '20%' }}>생성일시</th>
+                          <th style={{ width: '20%' }}>관리</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {profiles.map((profile) => {
-                          const isSelf = profile.id === currentUser?.id;
-                          return (
-                            <tr key={profile.id}>
-                              <td>
-                                <div style={{ fontWeight: 700 }}>{profile.email || '-'}</div>
-                                {isSelf && <div style={{ color: COLORS.blue, fontSize: 12, marginTop: 4 }}>현재 로그인 계정</div>}
-                              </td>
-                              <td>
-                                <label style={styles.checkControl}>
-                                  <input
-                                    type="checkbox"
-                                    checked={!!profile.approved}
-                                    disabled={isSelf}
-                                    onChange={(event) => updateUserApproval(profile.id, event.target.checked)}
-                                  />
-                                  <span>{profile.approved ? '승인 완료' : '승인 대기'}</span>
-                                </label>
-                              </td>
-                              <td>
-                                <label style={styles.checkControl}>
-                                  <input
-                                    type="checkbox"
-                                    checked={!!profile.is_admin}
-                                    disabled={isSelf}
-                                    onChange={(event) => updateUserRole(profile.id, event.target.checked)}
-                                  />
-                                  <span>{profile.is_admin ? '관리자' : '일반 사용자'}</span>
-                                </label>
-                              </td>
-                              <td>{profile.created_at ? formatDate(new Date(profile.created_at)) : '-'}</td>
-                              <td>
-                                <span style={profile.approved ? styles.statusBadgeGreen : styles.statusBadgeYellow}>
-                                  {profile.approved ? '사용 가능' : '승인 필요'}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
+                        {profiles.map((profile) => (
+                          <tr key={profile.id}>
+                            <td>{profile.email || '-'}</td>
+                            <td>{profile.approved ? '승인 완료' : '승인 대기'}</td>
+                            <td>{profile.is_admin ? '관리자' : '일반 사용자'}</td>
+                            <td>{profile.created_at ? formatDate(new Date(profile.created_at)) : '-'}</td>
+                            <td>
+                              <div style={styles.actionButtonWrap}>
+                                {!profile.approved ? (
+                                  <button style={styles.approveButton} onClick={() => approveUser(profile.id)}>
+                                    승인
+                                  </button>
+                                ) : (
+                                  <button
+                                    style={styles.revokeButton}
+                                    onClick={() => revokeUser(profile.id)}
+                                    disabled={profile.email === currentUser?.email}
+                                    title={profile.email === currentUser?.email ? '본인 계정은 승인 해제 불가' : ''}
+                                  >
+                                    승인 해제
+                                  </button>
+                                )}
+
+                                {profile.is_admin ? (
+                                  <button
+                                    style={styles.roleButtonMuted}
+                                    onClick={() => toggleAdminRole(profile.id, false, profile.email)}
+                                    disabled={profile.email === currentUser?.email}
+                                    title={profile.email === currentUser?.email ? '본인 계정은 관리자 해제 불가' : ''}
+                                  >
+                                    일반 전환
+                                  </button>
+                                ) : (
+                                  <button
+                                    style={styles.roleButton}
+                                    onClick={() => toggleAdminRole(profile.id, true, profile.email)}
+                                  >
+                                    관리자 부여
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
                         {profiles.length === 0 && (
                           <tr>
                             <td colSpan="5">등록된 사용자가 없습니다.</td>
@@ -1761,7 +1887,22 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
-          )}        </main>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+
+function VocKpiCard({ label, value, hint, color, bg }) {
+  return (
+    <div style={{ ...styles.vocKpiCard, borderColor: `${color}22` }}>
+      <div style={{ ...styles.vocKpiIcon, background: bg, color }}>●</div>
+      <div>
+        <div style={styles.vocKpiLabel}>{label}</div>
+        <div style={{ ...styles.vocKpiValue, color }}>{value}</div>
+        <div style={styles.vocKpiHint}>{hint}</div>
       </div>
     </div>
   );
@@ -1970,6 +2111,24 @@ const styles = {
     cursor: 'pointer',
     fontWeight: 700,
   },
+  roleButton: {
+    border: `1px solid ${COLORS.blue}`,
+    background: COLORS.blueSoft,
+    color: COLORS.blue,
+    borderRadius: 10,
+    padding: '8px 12px',
+    fontWeight: 900,
+    cursor: 'pointer',
+  },
+  roleButtonMuted: {
+    border: `1px solid ${COLORS.border}`,
+    background: COLORS.lightGraySoft,
+    color: COLORS.slate,
+    borderRadius: 10,
+    padding: '8px 12px',
+    fontWeight: 900,
+    cursor: 'pointer',
+  },
   revokeButton: {
     background: '#fff',
     color: COLORS.red,
@@ -2077,10 +2236,7 @@ const styles = {
   },
   infoLargeText: { color: COLORS.slate, fontSize: 16 },
   summaryGrid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
-  summaryGrid3: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 },
-  checkControl: { display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: 700, color: COLORS.text, cursor: 'pointer' },
-  statusBadgeGreen: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 72, padding: '6px 10px', borderRadius: 999, background: COLORS.greenSoft, color: '#15803d', fontSize: 12, fontWeight: 800 },
-  statusBadgeYellow: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: 72, padding: '6px 10px', borderRadius: 999, background: COLORS.yellowSoft, color: '#b45309', fontSize: 12, fontWeight: 800 },
+  summaryGrid4: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 },
   summaryBox: {
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,
@@ -2203,6 +2359,63 @@ const styles = {
   vocLayout: { display: 'grid', gap: 16 },
   dateFilterRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
   partSummaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 },
+  vocHeroPanel: {
+    background: 'linear-gradient(135deg, #ffffff 0%, #eef6ff 52%, #f3edff 100%)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 24,
+    padding: 24,
+    boxShadow: '0 16px 42px rgba(29, 99, 233, 0.10)',
+  },
+  vocHeroTop: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 18 },
+  vocEyebrow: { color: COLORS.blue, fontSize: 12, fontWeight: 900, letterSpacing: '0.12em', marginBottom: 8 },
+  vocHeroTitle: { fontSize: 26, fontWeight: 900, letterSpacing: '-0.03em', marginBottom: 8 },
+  vocHeroSub: { color: COLORS.sub, fontSize: 14, lineHeight: 1.5 },
+  vocDateBox: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    background: 'rgba(255,255,255,0.78)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 16,
+    padding: 10,
+    boxShadow: '0 8px 24px rgba(15, 23, 42, 0.05)',
+  },
+  vocDateInput: {
+    border: 'none',
+    background: 'transparent',
+    color: COLORS.text,
+    fontWeight: 800,
+    outline: 'none',
+    fontSize: 14,
+  },
+  vocDateDivider: { color: COLORS.sub, fontWeight: 800 },
+  vocKpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 14 },
+  vocKpiCard: {
+    background: 'rgba(255,255,255,0.86)',
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 18,
+    padding: 16,
+    display: 'flex',
+    gap: 12,
+    alignItems: 'flex-start',
+    boxShadow: '0 10px 24px rgba(15,23,42,0.05)',
+  },
+  vocKpiIcon: { width: 34, height: 34, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, flexShrink: 0 },
+  vocKpiLabel: { color: COLORS.sub, fontSize: 13, fontWeight: 800, marginBottom: 6 },
+  vocKpiValue: { fontSize: 26, fontWeight: 900, letterSpacing: '-0.02em', marginBottom: 4 },
+  vocKpiHint: { color: COLORS.sub, fontSize: 12, lineHeight: 1.4 },
+  sectionSubText: { color: COLORS.sub, fontSize: 13, marginTop: 6 },
+  fixedOrgBadge: { background: COLORS.blueSoft, color: COLORS.blue, border: `1px solid ${COLORS.blue}22`, borderRadius: 999, padding: '10px 14px', fontSize: 13, fontWeight: 900, height: 'fit-content', whiteSpace: 'nowrap' },
+  tableWrapModern: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 18, background: '#fff' },
+  tableModern: { width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', fontSize: 14 },
+  rankBadge: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 999, background: COLORS.lightGraySoft, color: COLORS.slate, fontWeight: 900 },
+  rankBadgeTop: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 999, background: COLORS.blueSoft, color: COLORS.blue, fontWeight: 900 },
+  orgBadge: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 999, background: COLORS.slateSoft, color: COLORS.slate, padding: '6px 10px', fontSize: 12, fontWeight: 800 },
+  completeBadge: { color: COLORS.green, background: COLORS.greenSoft, borderRadius: 999, padding: '6px 10px', fontWeight: 900 },
+  pendingBadge: { color: COLORS.orange, background: COLORS.orangeSoft, borderRadius: 999, padding: '6px 10px', fontWeight: 900 },
+  rateCell: { display: 'grid', gridTemplateColumns: '1fr 52px', gap: 10, alignItems: 'center' },
+  rateTrack: { height: 10, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' },
+  rateFill: { height: '100%', borderRadius: 999, background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})` },
   actionButtonWrap: { display: 'flex', gap: 8, justifyContent: 'center' },
 };
 

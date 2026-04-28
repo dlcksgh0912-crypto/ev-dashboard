@@ -148,6 +148,16 @@ function baseId13(value) {
   return id ? id.slice(0, 13) : '';
 }
 
+function findChargerIdInRow(row) {
+  for (const cell of row || []) {
+    const text = normalizeText(cell);
+    if (!text) continue;
+    const match = text.match(/\d{13}(?:-\d{1,2})?/);
+    if (match) return normalizeId(match[0]);
+  }
+  return '';
+}
+
 function normalizeSiteName(value) {
   return normalizeText(value).replace(/\s+/g, '');
 }
@@ -158,16 +168,50 @@ function toNumber(value) {
   return Number.isNaN(num) ? null : num;
 }
 
-function toLooseNumber(value) {
+// VOC 엑셀 S열은 0부터 시작하는 배열 기준 18번 인덱스입니다.
+// 정렬 기준은 반드시 이 S열의 누적충전량을 우선으로 사용합니다.
+const VOC_CUMULATIVE_CHARGE_INDEX = 18;
+
+function parseLooseNumber(value) {
   if (value === null || value === undefined || value === '') return null;
-  const text = String(value).replace(/,/g, '').trim();
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+
+  const text = String(value)
+    .replace(/,/g, '')
+    .replace(/kwh/gi, '')
+    .replace(/㎾h/gi, '')
+    .replace(/kw/gi, '')
+    .trim();
+
   if (!text) return null;
 
-  const matched = text.match(/-?\d+(?:\.\d+)?/);
-  if (!matched) return null;
+  // 숫자, 문자 혼합값 모두 대응: 예) 12,345 / 12345kWh / 누적 12345.6
+  const match = text.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
 
-  const num = Number(matched[0]);
-  return Number.isNaN(num) ? null : num;
+  const num = Number(match[0]);
+  return Number.isFinite(num) ? num : null;
+}
+
+function getVocCumulativeCharge(row, primaryIndex) {
+  // 사용자가 지정한 기준: VOC접수건 엑셀 S열(배열 인덱스 18)
+  // 기존처럼 T~W열까지 훑으면 완료자명/완료내용 날짜 숫자를 잘못 잡아 엉뚱한 순서가 될 수 있어 제거했습니다.
+  const sColumnValue = parseLooseNumber(row[VOC_CUMULATIVE_CHARGE_INDEX]);
+  if (sColumnValue !== null) return sColumnValue;
+
+  // 혹시 파일 양식이 바뀌어 헤더에서 누적충전량 위치가 별도로 잡힌 경우만 보조 사용합니다.
+  if (primaryIndex >= 0 && primaryIndex !== VOC_CUMULATIVE_CHARGE_INDEX) {
+    const headerMatchedValue = parseLooseNumber(row[primaryIndex]);
+    if (headerMatchedValue !== null) return headerMatchedValue;
+  }
+
+  return null;
+}
+
+function formatCumulativeCharge(value) {
+  const num = parseLooseNumber(value);
+  if (num === null) return '-';
+  return num.toLocaleString();
 }
 
 function parseDateValue(value) {
@@ -347,17 +391,22 @@ function parseReplacementFile(rows) {
 
 function mapVocColumns(headerRow) {
   const headers = headerRow.map((h) => normalizeText(h));
+  const withFallback = (candidates, fallback) => {
+    const idx = findHeaderIndex(headers, candidates);
+    return idx >= 0 ? idx : fallback;
+  };
+
   return {
-    matchId: findHeaderIndex(headers, ['충전기ID', '충전기 ID', '매칭ID', '매칭 ID']) >= 0 ? findHeaderIndex(headers, ['충전기ID', '충전기 ID', '매칭ID', '매칭 ID']) : 13,
-    siteName: findHeaderIndex(headers, ['충전소명', '현장명']) >= 0 ? findHeaderIndex(headers, ['충전소명', '현장명']) : 14,
-    progressName: findHeaderIndex(headers, ['진행 담당자명', '진행담당자명', '진행 담당자']) >= 0 ? findHeaderIndex(headers, ['진행 담당자명', '진행담당자명', '진행 담당자']) : 15,
-    progressOrg: findHeaderIndex(headers, ['진행 담당자 소속', '진행담당자소속', '진행 소속']) >= 0 ? findHeaderIndex(headers, ['진행 담당자 소속', '진행담당자소속', '진행 소속']) : 16,
-    completedAt: findHeaderIndex(headers, ['완료일시', '완료 일시']) >= 0 ? findHeaderIndex(headers, ['완료일시', '완료 일시']) : 17,
-    completedName: findHeaderIndex(headers, ['완료자명', '완료자 명', '완료 담당자']) >= 0 ? findHeaderIndex(headers, ['완료자명', '완료자 명', '완료 담당자']) : 18,
-    completedOrg: findHeaderIndex(headers, ['완료자 소속', '완료자소속', '완료 소속']) >= 0 ? findHeaderIndex(headers, ['완료자 소속', '완료자소속', '완료 소속']) : 19,
-    completedContent: findHeaderIndex(headers, ['완료내용', '완료 내용', '조치내용', '조치 내용']) >= 0 ? findHeaderIndex(headers, ['완료내용', '완료 내용', '조치내용', '조치 내용']) : 20,
+    matchId: withFallback(['충전기ID', '충전기 ID', '충전기번호', '충전기 번호', '매칭ID', 'matchId'], 13),
+    siteName: withFallback(['충전소명', '현장명', '사이트명'], 14),
+    progressName: withFallback(['진행 담당자', '진행담당자', '담당자명'], 15),
+    progressOrg: withFallback(['진행 담당자 소속', '진행담당자 소속', '진행 소속'], 16),
+    completedAt: withFallback(['완료일시', '완료 일시'], 17),
+    completedName: withFallback(['완료자명', '완료자 명', '완료 담당자'], 18),
+    completedOrg: withFallback(['완료자 소속', '완료 소속'], 19),
+    completedContent: withFallback(['완료내용', '완료 내용', '조치내용', '조치 내용'], 20),
     receivedAt: findHeaderIndex(headers, ['접수일', '접수일시']),
-    cumulativeCharge: findHeaderIndex(headers, ['누적충전량', '누적 충전량', '누적충전량(kWh)', '누적 충전량(kWh)']),
+    cumulativeCharge: findHeaderIndex(headers, ['누적충전량', '누적 충전량', '누적 충전량(kWh)', '누적충전', '충전량']),
   };
 }
 
@@ -365,12 +414,12 @@ function parseVocFile(rows) {
   const headerRow = rows[0] || [];
   const col = mapVocColumns(headerRow);
   if (col.receivedAt < 0) col.receivedAt = 1; // VOC B열 접수일시 fallback
-  if (col.cumulativeCharge < 0) col.cumulativeCharge = 18; // VOC S열 누적충전량 fallback
+  if (col.cumulativeCharge < 0) col.cumulativeCharge = VOC_CUMULATIVE_CHARGE_INDEX; // VOC S열 누적충전량 fallback
 
   return rows
     .slice(1)
     .map((row) => {
-      const matchId = normalizeId(row[col.matchId]);
+      const matchId = normalizeId(row[col.matchId]) || findChargerIdInRow(row);
       const siteName = normalizeText(row[col.siteName]);
       const completedName = normalizeText(row[col.completedName]);
       const completedOrg = normalizeText(row[col.completedOrg]);
@@ -379,7 +428,7 @@ function parseVocFile(rows) {
       const completedContent = normalizeText(row[col.completedContent]);
       const completedAt = parseDateValue(row[col.completedAt]);
       const receivedAt = col.receivedAt >= 0 ? parseDateValue(row[col.receivedAt]) : null;
-      const cumulativeCharge = col.cumulativeCharge >= 0 ? toLooseNumber(row[col.cumulativeCharge]) : null;
+      const cumulativeCharge = getVocCumulativeCharge(row, col.cumulativeCharge);
 
       const isCompleted = !!completedName && !!completedOrg;
       const isPending = !completedName && !completedOrg;
@@ -428,10 +477,20 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
   const completedByBaseId = new Map();
   const completedBySite = new Map();
 
+  const cumulativeByExactId = new Map();
+  const cumulativeByBaseId = new Map();
+  const cumulativeBySite = new Map();
+
   const pushMap = (map, key, value) => {
     if (!key) return;
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(value);
+  };
+
+  const setMaxNumber = (map, key, value) => {
+    if (!key || value === null || value === undefined) return;
+    const prev = map.get(key);
+    if (prev === undefined || value > prev) map.set(key, value);
   };
 
   for (const v of vocRows) {
@@ -445,6 +504,10 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       pushMap(completedByBaseId, v.matchBaseId, v);
       pushMap(completedBySite, v.matchSiteName, v);
     }
+
+    setMaxNumber(cumulativeByExactId, v.matchId, v.cumulativeCharge);
+    setMaxNumber(cumulativeByBaseId, v.matchBaseId, v.cumulativeCharge);
+    setMaxNumber(cumulativeBySite, v.matchSiteName, v.cumulativeCharge);
   }
 
   return rawRows.map((row) => {
@@ -458,11 +521,12 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
     const completedSite = completedBySite.get(normalizeSiteName(row.siteName)) || [];
     const completedMatches = completedExact.length ? completedExact : completedBase.length ? completedBase : completedSite;
 
-    const allVocMatches = [...vocPendingMatches, ...completedMatches];
-    const cumulativeCharge = allVocMatches.reduce((max, item) => {
-      if (item.cumulativeCharge === null || item.cumulativeCharge === undefined) return max;
-      return Math.max(max, item.cumulativeCharge);
-    }, 0);
+    const cumulativeCharge =
+      cumulativeByExactId.get(row.chargerId) ??
+      cumulativeByBaseId.get(row.chargerBaseId) ??
+      cumulativeBySite.get(normalizeSiteName(row.siteName)) ??
+      row.usageCount ??
+      null;
 
     const sortedHistory = [...completedMatches].sort((a, b) => (b.completedAt?.getTime() || 0) - (a.completedAt?.getTime() || 0));
     const latestCompleted = sortedHistory[0];
@@ -505,9 +569,9 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       latestCompletedContent: latestCompleted?.completedContent || '',
       recurrenceLabel,
       occurrenceCount,
-      cumulativeCharge,
       isLongPending,
       isVocOverAbnormal,
+      cumulativeCharge,
       recentHistory,
     };
   });
@@ -764,7 +828,7 @@ export default function Dashboard() {
   const [faultFilter, setFaultFilter] = useState('all');
   const [recurrenceFilter, setRecurrenceFilter] = useState('all');
   const [longPendingFilter, setLongPendingFilter] = useState('all');
-  const [detailSort, setDetailSort] = useState('default');
+  const [sortFilter, setSortFilter] = useState('default');
   const [orgFilter, setOrgFilter] = useState('EV세상');
   const [vocPartStartDate, setVocPartStartDate] = useState('');
   const [vocPartEndDate, setVocPartEndDate] = useState('');
@@ -1112,7 +1176,7 @@ export default function Dashboard() {
   }, [mergedRows, vocRows]);
 
   const filteredRows = useMemo(() => {
-    const rows = mergedRows.filter((row) => {
+    return mergedRows.filter((row) => {
       const matchesSearch =
         !searchText ||
         [row.chargerId, row.siteName, row.address].some((value) =>
@@ -1136,17 +1200,36 @@ export default function Dashboard() {
 
       return matchesSearch && matchesFault && matchesRecurrence && matchesLongPending;
     });
+  }, [mergedRows, searchText, faultFilter, recurrenceFilter, longPendingFilter]);
 
-    if (detailSort === 'recurrenceDesc') {
-      return [...rows].sort((a, b) => (b.occurrenceCount || 0) - (a.occurrenceCount || 0));
+  const sortedFilteredRows = useMemo(() => {
+    const rows = filteredRows.map((row, index) => ({ row, index }));
+
+    if (sortFilter === 'recurrenceDesc') {
+      rows.sort((a, b) => {
+        const aCount = Number(a.row.occurrenceCount || 0);
+        const bCount = Number(b.row.occurrenceCount || 0);
+        const diff = bCount - aCount;
+        return diff !== 0 ? diff : a.index - b.index;
+      });
+    } else if (sortFilter === 'cumulativeChargeDesc') {
+      rows.sort((a, b) => {
+        const av = parseLooseNumber(a.row.cumulativeCharge);
+        const bv = parseLooseNumber(b.row.cumulativeCharge);
+
+        // 둘 다 값이 없으면 기존 표시 순서 유지
+        if (av === null && bv === null) return a.index - b.index;
+        // 값이 없는 행은 항상 아래로
+        if (av === null) return 1;
+        if (bv === null) return -1;
+
+        const diff = bv - av;
+        return diff !== 0 ? diff : a.index - b.index;
+      });
     }
 
-    if (detailSort === 'cumulativeChargeDesc') {
-      return [...rows].sort((a, b) => (b.cumulativeCharge || 0) - (a.cumulativeCharge || 0));
-    }
-
-    return rows;
-  }, [mergedRows, searchText, faultFilter, recurrenceFilter, longPendingFilter, detailSort]);
+    return rows.map((item) => item.row);
+  }, [filteredRows, sortFilter]);
 
   const vocStats = useMemo(() => {
     const map = new Map();
@@ -1303,7 +1386,7 @@ export default function Dashboard() {
   }, [partUsageRows]);
 
   const downloadDetailsExcel = () => {
-    const exportRows = filteredRows.map((row) => ({
+    const exportRows = sortedFilteredRows.map((row) => ({
       충전소ID: row.siteId || '-',
       충전기ID: row.chargerId || '-',
       충전소명: row.siteName || '-',
@@ -1313,6 +1396,7 @@ export default function Dashboard() {
       고장분류: row.faultType || '-',
       최근수집일: row.collectedAtText || '-',
       재발생여부: row.recurrenceLabel || '-',
+      누적충전량: formatCumulativeCharge(row.cumulativeCharge),
       장기미조치: row.isLongPending ? '장기 미조치' : '-',
       과다이상: row.isVocOverAbnormal ? '과다이상' : '-',
       최근완료일: row.latestCompletedAtText || '-',
@@ -1350,6 +1434,7 @@ export default function Dashboard() {
     setFaultFilter('all');
     setRecurrenceFilter('all');
     setLongPendingFilter('all');
+    setSortFilter('default');
     setOrgFilter('EV세상');
     setVocPartStartDate('');
     setVocPartEndDate('');
@@ -1562,9 +1647,9 @@ export default function Dashboard() {
             <div style={styles.panel}>
               <div style={styles.sectionTitleRow}>
                 <div style={styles.sectionTitleNoMargin}>상세내역</div>
-                <div style={styles.detailHeaderActions}>
+                <div style={styles.detailActionRow}>
                   <div style={styles.countBox}>
-                    결과 조회 <strong>{filteredRows.length.toLocaleString()}건</strong>
+                    결과 조회 <strong>{sortedFilteredRows.length.toLocaleString()}건</strong>
                   </div>
                   <button style={styles.secondaryButton} onClick={downloadDetailsExcel}>
                     결과 엑셀 다운로드
@@ -1596,7 +1681,7 @@ export default function Dashboard() {
                   <option value="all">전체보기</option>
                   <option value="only">장기 미조치만 보기</option>
                 </select>
-                <select style={styles.select} value={detailSort} onChange={(e) => setDetailSort(e.target.value)}>
+                <select style={styles.select} value={sortFilter} onChange={(e) => setSortFilter(e.target.value)}>
                   <option value="default">정렬기준</option>
                   <option value="recurrenceDesc">재발생 높은순</option>
                   <option value="cumulativeChargeDesc">누적 충전량 높은순</option>
@@ -1613,14 +1698,15 @@ export default function Dashboard() {
                       <th style={{ width: '11%' }}>상태</th>
                       <th style={{ width: '10%' }}>고장분류</th>
                       <th style={{ width: '10%' }}>최근수집일</th>
-                      <th style={{ width: '11%' }}>재발생 여부</th>
-                      <th style={{ width: '11%' }}>장기 미조치</th>
+                      <th style={{ width: '10%' }}>재발생 여부</th>
+                      <th style={{ width: '9%' }}>누적충전량</th>
+                      <th style={{ width: '10%' }}>장기 미조치</th>
                       <th style={{ width: '7%' }}>과다이상</th>
                       <th style={{ width: '19%' }}>이후 내용</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredRows.slice(0, 1000).map((row) => (
+                    {sortedFilteredRows.slice(0, 1000).map((row) => (
                       <tr key={`${row.chargerId}-${row.rowIndex}`}>
                         <td>{row.chargerId}</td>
                         <td>{row.siteName || '-'}</td>
@@ -1629,6 +1715,7 @@ export default function Dashboard() {
                         <td>{row.faultType || '-'}</td>
                         <td>{row.collectedAtText}</td>
                         <td style={styles.nowrapCell}>{row.recurrenceLabel}</td>
+                        <td style={styles.nowrapCell}>{formatCumulativeCharge(row.cumulativeCharge)}</td>
                         <td style={styles.nowrapCell}>{row.isLongPending ? '장기 미조치' : '-'}</td>
                         <td>{row.isVocOverAbnormal ? '과다이상' : '-'}</td>
                         <td title={row.latestCompletedContent || '-'}>{summarizeAfterContent(row.latestCompletedContent)}</td>
@@ -1650,7 +1737,7 @@ export default function Dashboard() {
                 onChange={(e) => setSearchText(e.target.value)}
               />
               <div style={styles.searchGrid}>
-                {filteredRows.slice(0, 20).map((row) => (
+                {sortedFilteredRows.slice(0, 20).map((row) => (
                   <div key={`${row.chargerId}-${row.rowIndex}-search`} style={styles.searchCard}>
                     <div style={styles.searchHeader}>
                       <div>
@@ -1663,6 +1750,7 @@ export default function Dashboard() {
                     <div style={styles.searchLine}>최근 수집일: {row.collectedAtText}</div>
                     <div style={styles.searchLine}>충전소 상태: {row.siteStatus || '-'}</div>
                     <div style={styles.searchLine}>재발생 여부: {row.recurrenceLabel}</div>
+                    <div style={styles.searchLine}>누적충전량: {formatCumulativeCharge(row.cumulativeCharge)}</div>
                     <div style={styles.searchLine}>장기 미조치: {row.isLongPending ? '장기 미조치' : '-'}</div>
                     <div style={styles.searchLine}>과다이상: {row.isVocOverAbnormal ? '과다이상' : '-'}</div>
                     <div style={styles.searchLine}>최근 완료일: {row.latestCompletedAtText}</div>
@@ -2230,6 +2318,7 @@ const styles = {
   sectionTitle: { fontSize: 17, fontWeight: 800, marginBottom: 16 },
   sectionTitleNoMargin: { fontSize: 17, fontWeight: 800 },
   sectionTitleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' },
+  detailActionRow: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' },
   donutLayout: { display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, alignItems: 'center' },
   donutWrap: { display: 'flex', justifyContent: 'center', alignItems: 'center' },
   donut: { width: 190, height: 190, borderRadius: '50%', display: 'flex', justifyContent: 'center', alignItems: 'center' },
@@ -2297,7 +2386,6 @@ const styles = {
     color: COLORS.slate,
   },
   filterRowWide: { display: 'grid', gridTemplateColumns: '1.4fr 1fr 0.9fr 1fr 0.9fr', gap: 12, marginBottom: 16 },
-  detailHeaderActions: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
   input: {
     width: '100%',
     border: `1px solid ${COLORS.border}`,

@@ -158,6 +158,18 @@ function toNumber(value) {
   return Number.isNaN(num) ? null : num;
 }
 
+function toLooseNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value).replace(/,/g, '').trim();
+  if (!text) return null;
+
+  const matched = text.match(/-?\d+(?:\.\d+)?/);
+  if (!matched) return null;
+
+  const num = Number(matched[0]);
+  return Number.isNaN(num) ? null : num;
+}
+
 function parseDateValue(value) {
   if (!value && value !== 0) return null;
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
@@ -336,15 +348,16 @@ function parseReplacementFile(rows) {
 function mapVocColumns(headerRow) {
   const headers = headerRow.map((h) => normalizeText(h));
   return {
-    matchId: 13,
-    siteName: 14,
-    progressName: 15,
-    progressOrg: 16,
-    completedAt: 17,
-    completedName: 18,
-    completedOrg: 19,
-    completedContent: 20,
+    matchId: findHeaderIndex(headers, ['충전기ID', '충전기 ID', '매칭ID', '매칭 ID']) >= 0 ? findHeaderIndex(headers, ['충전기ID', '충전기 ID', '매칭ID', '매칭 ID']) : 13,
+    siteName: findHeaderIndex(headers, ['충전소명', '현장명']) >= 0 ? findHeaderIndex(headers, ['충전소명', '현장명']) : 14,
+    progressName: findHeaderIndex(headers, ['진행 담당자명', '진행담당자명', '진행 담당자']) >= 0 ? findHeaderIndex(headers, ['진행 담당자명', '진행담당자명', '진행 담당자']) : 15,
+    progressOrg: findHeaderIndex(headers, ['진행 담당자 소속', '진행담당자소속', '진행 소속']) >= 0 ? findHeaderIndex(headers, ['진행 담당자 소속', '진행담당자소속', '진행 소속']) : 16,
+    completedAt: findHeaderIndex(headers, ['완료일시', '완료 일시']) >= 0 ? findHeaderIndex(headers, ['완료일시', '완료 일시']) : 17,
+    completedName: findHeaderIndex(headers, ['완료자명', '완료자 명', '완료 담당자']) >= 0 ? findHeaderIndex(headers, ['완료자명', '완료자 명', '완료 담당자']) : 18,
+    completedOrg: findHeaderIndex(headers, ['완료자 소속', '완료자소속', '완료 소속']) >= 0 ? findHeaderIndex(headers, ['완료자 소속', '완료자소속', '완료 소속']) : 19,
+    completedContent: findHeaderIndex(headers, ['완료내용', '완료 내용', '조치내용', '조치 내용']) >= 0 ? findHeaderIndex(headers, ['완료내용', '완료 내용', '조치내용', '조치 내용']) : 20,
     receivedAt: findHeaderIndex(headers, ['접수일', '접수일시']),
+    cumulativeCharge: findHeaderIndex(headers, ['누적충전량', '누적 충전량', '누적충전량(kWh)', '누적 충전량(kWh)']),
   };
 }
 
@@ -352,6 +365,7 @@ function parseVocFile(rows) {
   const headerRow = rows[0] || [];
   const col = mapVocColumns(headerRow);
   if (col.receivedAt < 0) col.receivedAt = 1; // VOC B열 접수일시 fallback
+  if (col.cumulativeCharge < 0) col.cumulativeCharge = 18; // VOC S열 누적충전량 fallback
 
   return rows
     .slice(1)
@@ -365,6 +379,7 @@ function parseVocFile(rows) {
       const completedContent = normalizeText(row[col.completedContent]);
       const completedAt = parseDateValue(row[col.completedAt]);
       const receivedAt = col.receivedAt >= 0 ? parseDateValue(row[col.receivedAt]) : null;
+      const cumulativeCharge = col.cumulativeCharge >= 0 ? toLooseNumber(row[col.cumulativeCharge]) : null;
 
       const isCompleted = !!completedName && !!completedOrg;
       const isPending = !completedName && !completedOrg;
@@ -396,6 +411,7 @@ function parseVocFile(rows) {
         completedContent,
         completedAt,
         receivedAt,
+        cumulativeCharge,
         isCompleted,
         isPending,
       };
@@ -442,6 +458,12 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
     const completedSite = completedBySite.get(normalizeSiteName(row.siteName)) || [];
     const completedMatches = completedExact.length ? completedExact : completedBase.length ? completedBase : completedSite;
 
+    const allVocMatches = [...vocPendingMatches, ...completedMatches];
+    const cumulativeCharge = allVocMatches.reduce((max, item) => {
+      if (item.cumulativeCharge === null || item.cumulativeCharge === undefined) return max;
+      return Math.max(max, item.cumulativeCharge);
+    }, 0);
+
     const sortedHistory = [...completedMatches].sort((a, b) => (b.completedAt?.getTime() || 0) - (a.completedAt?.getTime() || 0));
     const latestCompleted = sortedHistory[0];
     const recentHistory = sortedHistory.slice(0, 3).map((item) => ({
@@ -483,6 +505,7 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       latestCompletedContent: latestCompleted?.completedContent || '',
       recurrenceLabel,
       occurrenceCount,
+      cumulativeCharge,
       isLongPending,
       isVocOverAbnormal,
       recentHistory,
@@ -741,6 +764,7 @@ export default function Dashboard() {
   const [faultFilter, setFaultFilter] = useState('all');
   const [recurrenceFilter, setRecurrenceFilter] = useState('all');
   const [longPendingFilter, setLongPendingFilter] = useState('all');
+  const [detailSort, setDetailSort] = useState('default');
   const [orgFilter, setOrgFilter] = useState('EV세상');
   const [vocPartStartDate, setVocPartStartDate] = useState('');
   const [vocPartEndDate, setVocPartEndDate] = useState('');
@@ -1088,7 +1112,7 @@ export default function Dashboard() {
   }, [mergedRows, vocRows]);
 
   const filteredRows = useMemo(() => {
-    return mergedRows.filter((row) => {
+    const rows = mergedRows.filter((row) => {
       const matchesSearch =
         !searchText ||
         [row.chargerId, row.siteName, row.address].some((value) =>
@@ -1112,7 +1136,17 @@ export default function Dashboard() {
 
       return matchesSearch && matchesFault && matchesRecurrence && matchesLongPending;
     });
-  }, [mergedRows, searchText, faultFilter, recurrenceFilter, longPendingFilter]);
+
+    if (detailSort === 'recurrenceDesc') {
+      return [...rows].sort((a, b) => (b.occurrenceCount || 0) - (a.occurrenceCount || 0));
+    }
+
+    if (detailSort === 'cumulativeChargeDesc') {
+      return [...rows].sort((a, b) => (b.cumulativeCharge || 0) - (a.cumulativeCharge || 0));
+    }
+
+    return rows;
+  }, [mergedRows, searchText, faultFilter, recurrenceFilter, longPendingFilter, detailSort]);
 
   const vocStats = useMemo(() => {
     const map = new Map();
@@ -1528,9 +1562,14 @@ export default function Dashboard() {
             <div style={styles.panel}>
               <div style={styles.sectionTitleRow}>
                 <div style={styles.sectionTitleNoMargin}>상세내역</div>
-                <button style={styles.secondaryButton} onClick={downloadDetailsExcel}>
-                  결과 엑셀 다운로드
-                </button>
+                <div style={styles.detailHeaderActions}>
+                  <div style={styles.countBox}>
+                    결과 조회 <strong>{filteredRows.length.toLocaleString()}건</strong>
+                  </div>
+                  <button style={styles.secondaryButton} onClick={downloadDetailsExcel}>
+                    결과 엑셀 다운로드
+                  </button>
+                </div>
               </div>
 
               <div style={styles.filterRowWide}>
@@ -1550,16 +1589,18 @@ export default function Dashboard() {
                   <option value="미인입 고장">미인입 고장</option>
                 </select>
                 <select style={styles.select} value={recurrenceFilter} onChange={(e) => setRecurrenceFilter(e.target.value)}>
-                  <option value="all">재발생 전체</option>
+                  <option value="all">전체보기</option>
                   <option value="only">재발생만 보기</option>
                 </select>
                 <select style={styles.select} value={longPendingFilter} onChange={(e) => setLongPendingFilter(e.target.value)}>
-                  <option value="all">장기 미조치 전체</option>
+                  <option value="all">전체보기</option>
                   <option value="only">장기 미조치만 보기</option>
                 </select>
-                <div style={styles.countBox}>
-                  결과 조회 <strong>{filteredRows.length.toLocaleString()}건</strong>
-                </div>
+                <select style={styles.select} value={detailSort} onChange={(e) => setDetailSort(e.target.value)}>
+                  <option value="default">정렬기준</option>
+                  <option value="recurrenceDesc">재발생 높은순</option>
+                  <option value="cumulativeChargeDesc">누적 충전량 높은순</option>
+                </select>
               </div>
 
               <div style={styles.tableWrap}>
@@ -2256,6 +2297,7 @@ const styles = {
     color: COLORS.slate,
   },
   filterRowWide: { display: 'grid', gridTemplateColumns: '1.4fr 1fr 0.9fr 1fr 0.9fr', gap: 12, marginBottom: 16 },
+  detailHeaderActions: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
   input: {
     width: '100%',
     border: `1px solid ${COLORS.border}`,

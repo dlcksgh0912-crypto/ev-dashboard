@@ -834,6 +834,7 @@ export default function Dashboard() {
   const [vocPartEndDate, setVocPartEndDate] = useState('');
   const [vocPerformanceStartDate, setVocPerformanceStartDate] = useState('');
   const [vocPerformanceEndDate, setVocPerformanceEndDate] = useState('');
+  const [vocPerformanceSortFilter, setVocPerformanceSortFilter] = useState('rateDesc');
   const [isRestoring, setIsRestoring] = useState(true);
 
   const [profiles, setProfiles] = useState([]);
@@ -1317,8 +1318,28 @@ export default function Dashboard() {
         return { ...row, completionRate };
       })
       .filter((row) => row.received > 0 || row.completed > 0 || row.pending > 0)
-      .sort((a, b) => b.completed + b.pending + b.received - (a.completed + a.pending + a.received));
-  }, [vocRows, orgFilter, vocPerformanceRange]);
+      .sort((a, b) => {
+        if (vocPerformanceSortFilter === 'rateDesc') {
+          const diff = (b.completionRate || 0) - (a.completionRate || 0);
+          if (diff !== 0) return diff;
+          const completedDiff = (b.completed || 0) - (a.completed || 0);
+          return completedDiff !== 0 ? completedDiff : (b.received || 0) - (a.received || 0);
+        }
+
+        if (vocPerformanceSortFilter === 'receivedDesc') {
+          const diff = (b.received || 0) - (a.received || 0);
+          return diff !== 0 ? diff : (b.completed || 0) - (a.completed || 0);
+        }
+
+        if (vocPerformanceSortFilter === 'pendingDesc') {
+          const diff = (b.pending || 0) - (a.pending || 0);
+          return diff !== 0 ? diff : (b.completed || 0) - (a.completed || 0);
+        }
+
+        const diff = (b.completed || 0) - (a.completed || 0);
+        return diff !== 0 ? diff : (b.received || 0) - (a.received || 0);
+      });
+  }, [vocRows, orgFilter, vocPerformanceRange, vocPerformanceSortFilter]);
 
   const vocPerformanceSummary = useMemo(() => {
     const totalReceived = vocPerformanceStats.reduce((sum, row) => sum + row.received, 0);
@@ -1440,6 +1461,7 @@ export default function Dashboard() {
     setVocPartEndDate('');
     setVocPerformanceStartDate('');
     setVocPerformanceEndDate('');
+    setVocPerformanceSortFilter('rateDesc');
   };
 
   const navItems = [
@@ -1785,10 +1807,19 @@ export default function Dashboard() {
                     <div style={styles.vocHeroTitle}>기간별 VOC 처리 현황</div>
                     <div style={styles.vocHeroSub}>접수일시(B열)와 완료일시(R열)를 기준으로 인원별 실적을 확인합니다.</div>
                   </div>
-                  <div style={styles.vocDateBox}>
-                    <input type="date" style={styles.vocDateInput} value={vocPerformanceStartDate} onChange={(e) => setVocPerformanceStartDate(e.target.value)} />
-                    <span style={styles.vocDateDivider}>~</span>
-                    <input type="date" style={styles.vocDateInput} value={vocPerformanceEndDate} onChange={(e) => setVocPerformanceEndDate(e.target.value)} />
+                  <div style={styles.vocControlBox}>
+                    <select style={styles.vocSortSelect} value={vocPerformanceSortFilter} onChange={(e) => setVocPerformanceSortFilter(e.target.value)}>
+                      <option value="rateDesc">정렬기준: 완료율 높은 순</option>
+                      <option value="receivedDesc">접수 많은 순</option>
+                      <option value="completedDesc">완료 많은 순</option>
+                      <option value="pendingDesc">진행 중 많은 순</option>
+                      <option value="rateDesc">완료율 높은 순</option>
+                    </select>
+                    <div style={styles.vocDateBox}>
+                      <input type="date" style={styles.vocDateInput} value={vocPerformanceStartDate} onChange={(e) => setVocPerformanceStartDate(e.target.value)} />
+                      <span style={styles.vocDateDivider}>~</span>
+                      <input type="date" style={styles.vocDateInput} value={vocPerformanceEndDate} onChange={(e) => setVocPerformanceEndDate(e.target.value)} />
+                    </div>
                   </div>
                 </div>
 
@@ -2500,6 +2531,18 @@ const styles = {
     boxShadow: '0 16px 42px rgba(29, 99, 233, 0.10)',
   },
   vocHeroTop: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 18 },
+  vocControlBox: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' },
+  vocSortSelect: {
+    border: `1px solid ${COLORS.border}`,
+    background: 'rgba(255,255,255,0.82)',
+    color: COLORS.text,
+    borderRadius: 16,
+    padding: '13px 14px',
+    fontSize: 14,
+    fontWeight: 800,
+    outline: 'none',
+    boxShadow: '0 8px 24px rgba(15, 23, 42, 0.05)',
+  },
   vocEyebrow: { color: COLORS.blue, fontSize: 12, fontWeight: 900, letterSpacing: '0.12em', marginBottom: 8 },
   vocHeroTitle: { fontSize: 26, fontWeight: 900, letterSpacing: '-0.03em', marginBottom: 8 },
   vocHeroSub: { color: COLORS.sub, fontSize: 14, lineHeight: 1.5 },

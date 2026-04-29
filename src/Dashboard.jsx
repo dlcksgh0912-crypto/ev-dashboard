@@ -139,6 +139,85 @@ function isValidChargerReplacement(text) {
   return hasChargerReplace && !hasExcludeWord;
 }
 
+function isPartReplacementContent(value) {
+  const text = normalizeText(value);
+  if (!text) return false;
+
+  if (text.includes('부품교체')) return true;
+
+  return Object.entries(PART_PATTERNS).some(([name, regex]) => {
+    if (name === '충전기') {
+      return isValidChargerReplacement(text);
+    }
+    return regex.test(text);
+  });
+}
+
+function calculateVocHistoryStats(matches = []) {
+  const events = matches
+    .filter((item) => item && (item.receivedAt || item.completedAt || item.isCompleted || item.completedContent))
+    .map((item, index) => {
+      const receivedMs = item.receivedAt?.getTime?.() ?? item.completedAt?.getTime?.() ?? Number.MAX_SAFE_INTEGER - index;
+      const completedMs = item.completedAt?.getTime?.() ?? null;
+      return {
+        ...item,
+        _sortIndex: index,
+        _receivedMs: receivedMs,
+        _completedMs: completedMs,
+        _isPartReplacement: item.isCompleted && isPartReplacementContent(item.completedContent),
+      };
+    })
+    .sort((a, b) => {
+      const diff = a._receivedMs - b._receivedMs;
+      return diff !== 0 ? diff : a._sortIndex - b._sortIndex;
+    });
+
+  const cycles = [];
+  let currentCycle = null;
+  let partReplaceCount = 0;
+
+  const createCycle = (event) => ({
+    inboundCount: 1,
+    completedRows: event.isCompleted ? 1 : 0,
+    completionMs: event._completedMs,
+  });
+
+  for (const event of events) {
+    if (event._isPartReplacement) partReplaceCount += 1;
+
+    if (!currentCycle) {
+      currentCycle = createCycle(event);
+      continue;
+    }
+
+    const hasClosedCycle = currentCycle.completionMs !== null && event._receivedMs > currentCycle.completionMs;
+
+    if (hasClosedCycle) {
+      cycles.push(currentCycle);
+      currentCycle = createCycle(event);
+    } else {
+      currentCycle.inboundCount += 1;
+      if (event.isCompleted) currentCycle.completedRows += 1;
+      if (event._completedMs !== null) {
+        currentCycle.completionMs = currentCycle.completionMs === null
+          ? event._completedMs
+          : Math.max(currentCycle.completionMs, event._completedMs);
+      }
+    }
+  }
+
+  if (currentCycle) cycles.push(currentCycle);
+
+  const recurrenceCount = cycles.filter((cycle) => cycle.completedRows > 0).length;
+  const reinboundCount = cycles.reduce((max, cycle) => Math.max(max, cycle.inboundCount || 0), 0);
+
+  return {
+    recurrenceCount,
+    reinboundCount,
+    partReplaceCount,
+  };
+}
+
 function normalizeId(value) {
   return normalizeText(value).replace(/[^0-9-]/g, '');
 }
@@ -477,6 +556,10 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
   const completedByBaseId = new Map();
   const completedBySite = new Map();
 
+  const allVocByExactId = new Map();
+  const allVocByBaseId = new Map();
+  const allVocBySite = new Map();
+
   const cumulativeByExactId = new Map();
   const cumulativeByBaseId = new Map();
   const cumulativeBySite = new Map();
@@ -494,6 +577,10 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
   };
 
   for (const v of vocRows) {
+    pushMap(allVocByExactId, v.matchId, v);
+    pushMap(allVocByBaseId, v.matchBaseId, v);
+    pushMap(allVocBySite, v.matchSiteName, v);
+
     if (v.isPending) {
       pushMap(pendingByExactId, v.matchId, v);
       pushMap(pendingByBaseId, v.matchBaseId, v);
@@ -511,20 +598,29 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
   }
 
   return rawRows.map((row) => {
+    const normalizedSiteName = normalizeSiteName(row.siteName);
+
     const pendingExact = pendingByExactId.get(row.chargerId) || [];
     const pendingBase = pendingByBaseId.get(row.chargerBaseId) || [];
-    const pendingSite = pendingBySite.get(normalizeSiteName(row.siteName)) || [];
+    const pendingSite = pendingBySite.get(normalizedSiteName) || [];
     const vocPendingMatches = pendingExact.length ? pendingExact : pendingBase.length ? pendingBase : pendingSite;
 
     const completedExact = completedByExactId.get(row.chargerId) || [];
     const completedBase = completedByBaseId.get(row.chargerBaseId) || [];
-    const completedSite = completedBySite.get(normalizeSiteName(row.siteName)) || [];
+    const completedSite = completedBySite.get(normalizedSiteName) || [];
     const completedMatches = completedExact.length ? completedExact : completedBase.length ? completedBase : completedSite;
+
+    const allExact = allVocByExactId.get(row.chargerId) || [];
+    const allBase = allVocByBaseId.get(row.chargerBaseId) || [];
+    const allSite = allVocBySite.get(normalizedSiteName) || [];
+    const allVocMatches = allExact.length ? allExact : allBase.length ? allBase : allSite;
+
+    const historyStats = calculateVocHistoryStats(allVocMatches);
 
     const cumulativeCharge =
       cumulativeByExactId.get(row.chargerId) ??
       cumulativeByBaseId.get(row.chargerBaseId) ??
-      cumulativeBySite.get(normalizeSiteName(row.siteName)) ??
+      cumulativeBySite.get(normalizedSiteName) ??
       row.usageCount ??
       null;
 
@@ -545,12 +641,23 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       else faultType = '미인입 고장';
     }
 
-    const occurrenceCount = completedMatches.length;
+    const occurrenceCount = faultType === 'VOC 조치 예정' ? historyStats.recurrenceCount : 0;
+    const reinboundCount = faultType === 'VOC 조치 예정' ? historyStats.reinboundCount : 0;
+    const partReplaceCount = faultType === 'VOC 조치 예정' ? historyStats.partReplaceCount : 0;
+
     let recurrenceLabel = '-';
     if (faultType === 'VOC 조치 예정') {
-      if (occurrenceCount === 2) recurrenceLabel = '2회 재발생';
-      else if (occurrenceCount === 3) recurrenceLabel = '3회 재발생';
-      else if (occurrenceCount >= 4) recurrenceLabel = '4회 이상';
+      if (partReplaceCount >= 3) {
+        recurrenceLabel = `부품교체 ${partReplaceCount}회`;
+      } else if (reinboundCount >= 3) {
+        recurrenceLabel = `재인입 ${reinboundCount}회`;
+      } else if (occurrenceCount === 2) {
+        recurrenceLabel = '2회 재발생';
+      } else if (occurrenceCount === 3) {
+        recurrenceLabel = '3회 재발생';
+      } else if (occurrenceCount >= 4) {
+        recurrenceLabel = '4회 이상';
+      }
     }
 
     let isLongPending = false;
@@ -569,6 +676,8 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       latestCompletedContent: latestCompleted?.completedContent || '',
       recurrenceLabel,
       occurrenceCount,
+      reinboundCount,
+      partReplaceCount,
       isLongPending,
       isVocOverAbnormal,
       cumulativeCharge,
@@ -1152,6 +1261,7 @@ export default function Dashboard() {
     const faultRate = normalOperation > 0 ? ((faultCount / normalOperation) * 100).toFixed(1) : '0.0';
 
     const vocRecurring = vocPendingRows.filter((r) => r.occurrenceCount >= 2).length;
+    const vocReinbound = vocPendingRows.filter((r) => r.reinboundCount >= 3).length;
     const vocLongPending = vocPendingRows.filter((r) => r.isLongPending).length;
     const vocOverAbnormal = vocPendingRows.filter((r) => r.isVocOverAbnormal).length;
 
@@ -1169,6 +1279,7 @@ export default function Dashboard() {
       replacement,
       uninbound,
       vocRecurring,
+      vocReinbound,
       vocLongPending,
       vocOverAbnormal,
       evCompleted,
@@ -1194,7 +1305,15 @@ export default function Dashboard() {
               : row.faultType === faultFilter;
 
       const matchesRecurrence =
-        recurrenceFilter === 'all' ? true : recurrenceFilter === 'only' ? row.occurrenceCount >= 2 : true;
+        recurrenceFilter === 'all'
+          ? true
+          : recurrenceFilter === 'recurrence'
+            ? row.occurrenceCount >= 2 && row.partReplaceCount < 3 && row.reinboundCount < 3
+            : recurrenceFilter === 'part3'
+              ? row.partReplaceCount >= 3
+              : recurrenceFilter === 'reinbound3'
+                ? row.reinboundCount >= 3
+                : true;
 
       const matchesLongPending =
         longPendingFilter === 'all' ? true : longPendingFilter === 'only' ? row.isLongPending : true;
@@ -1417,6 +1536,9 @@ export default function Dashboard() {
       고장분류: row.faultType || '-',
       최근수집일: row.collectedAtText || '-',
       재발생여부: row.recurrenceLabel || '-',
+      재발생횟수: row.occurrenceCount || 0,
+      재인입횟수: row.reinboundCount || 0,
+      부품교체횟수: row.partReplaceCount || 0,
       누적충전량: formatCumulativeCharge(row.cumulativeCharge),
       장기미조치: row.isLongPending ? '장기 미조치' : '-',
       과다이상: row.isVocOverAbnormal ? '과다이상' : '-',
@@ -1595,7 +1717,7 @@ export default function Dashboard() {
                 <StatCard
                   title="VOC 조치 예정"
                   value={`${dashboard.vocPending.toLocaleString()}기`}
-                  sub={`재발생 ${dashboard.vocRecurring.toLocaleString()}기 / 장기 미조치 ${dashboard.vocLongPending.toLocaleString()}기 / 과다이상 ${dashboard.vocOverAbnormal.toLocaleString()}기`}
+                  sub={`재발생 ${dashboard.vocRecurring.toLocaleString()}기 / 재인입 ${dashboard.vocReinbound.toLocaleString()}기`}
                 />
                 <StatCard
                   title="미인입 고장"
@@ -1697,7 +1819,9 @@ export default function Dashboard() {
                 </select>
                 <select style={styles.select} value={recurrenceFilter} onChange={(e) => setRecurrenceFilter(e.target.value)}>
                   <option value="all">전체보기</option>
-                  <option value="only">재발생만 보기</option>
+                  <option value="recurrence">재발생만 보기</option>
+                  <option value="part3">부품교체 3회 이상 보기</option>
+                  <option value="reinbound3">재인입 3회 이상 보기</option>
                 </select>
                 <select style={styles.select} value={longPendingFilter} onChange={(e) => setLongPendingFilter(e.target.value)}>
                   <option value="all">전체보기</option>
@@ -1718,13 +1842,12 @@ export default function Dashboard() {
                       <th style={{ width: '13%' }}>충전소명</th>
                       <th style={{ width: '6%' }}>주소</th>
                       <th style={{ width: '11%' }}>상태</th>
-                      <th style={{ width: '10%' }}>고장분류</th>
+                      <th style={{ width: '13%' }}>고장분류</th>
                       <th style={{ width: '10%' }}>최근수집일</th>
                       <th style={{ width: '10%' }}>재발생 여부</th>
                       <th style={{ width: '9%' }}>누적충전량</th>
                       <th style={{ width: '10%' }}>장기 미조치</th>
-                      <th style={{ width: '7%' }}>과다이상</th>
-                      <th style={{ width: '19%' }}>이후 내용</th>
+                      <th style={{ width: '23%' }}>이후 내용</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1739,7 +1862,6 @@ export default function Dashboard() {
                         <td style={styles.nowrapCell}>{row.recurrenceLabel}</td>
                         <td style={styles.nowrapCell}>{formatCumulativeCharge(row.cumulativeCharge)}</td>
                         <td style={styles.nowrapCell}>{row.isLongPending ? '장기 미조치' : '-'}</td>
-                        <td>{row.isVocOverAbnormal ? '과다이상' : '-'}</td>
                         <td title={row.latestCompletedContent || '-'}>{summarizeAfterContent(row.latestCompletedContent)}</td>
                       </tr>
                     ))}
@@ -1772,6 +1894,8 @@ export default function Dashboard() {
                     <div style={styles.searchLine}>최근 수집일: {row.collectedAtText}</div>
                     <div style={styles.searchLine}>충전소 상태: {row.siteStatus || '-'}</div>
                     <div style={styles.searchLine}>재발생 여부: {row.recurrenceLabel}</div>
+                    <div style={styles.searchLine}>재인입 횟수: {row.reinboundCount || 0}회</div>
+                    <div style={styles.searchLine}>부품교체 횟수: {row.partReplaceCount || 0}회</div>
                     <div style={styles.searchLine}>누적충전량: {formatCumulativeCharge(row.cumulativeCharge)}</div>
                     <div style={styles.searchLine}>장기 미조치: {row.isLongPending ? '장기 미조치' : '-'}</div>
                     <div style={styles.searchLine}>과다이상: {row.isVocOverAbnormal ? '과다이상' : '-'}</div>

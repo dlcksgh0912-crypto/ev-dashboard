@@ -337,14 +337,44 @@ function shortAddress(value) {
   return text.slice(0, 2);
 }
 
+function extractPartNamesFromContent(value) {
+  const text = normalizeText(value);
+  if (!text) return [];
+
+  return Object.entries(PART_PATTERNS)
+    .filter(([name, regex]) => {
+      if (name === '충전기') return isValidChargerReplacement(text);
+      return regex.test(text);
+    })
+    .map(([name]) => name);
+}
+
 function summarizeAfterContent(value) {
   const text = normalizeText(value);
   if (!text) return '-';
 
-  const match = text.match(/(\d{6}\s+\S+\s+\[[^\]]+\])/);
-  if (match) return match[1];
+  // 예: 260417 김현수 / 20260417 김현수 형태만 간단히 표시
+  const headerMatch = text.match(/((?:\d{6}|\d{8})\s+[^\s\[]+)/);
+  const header = headerMatch ? headerMatch[1] : '';
 
-  return text;
+  const parts = extractPartNamesFromContent(text);
+
+  let result = '';
+  if (/정상\s?충전|정상\s?동작|정상처리|정상\s?확인/i.test(text)) {
+    result = '정상충전 확인';
+  } else if (/교체/i.test(text)) {
+    result = '부품 교체';
+  }
+
+  const summary = [
+    header ? `📌 ${header}` : '',
+    parts.length ? `🔧 ${parts.join(', ')}` : '',
+    result ? `✅ ${result}` : '',
+  ].filter(Boolean);
+
+  if (summary.length > 0) return summary.join('\n');
+
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text;
 }
 
 function extractCutoffFromFilename(fileName) {
@@ -941,6 +971,7 @@ export default function Dashboard() {
   const [orgFilter, setOrgFilter] = useState('EV세상');
   const [vocPartStartDate, setVocPartStartDate] = useState('');
   const [vocPartEndDate, setVocPartEndDate] = useState('');
+  const [vocPartCompareMode, setVocPartCompareMode] = useState('samePeriod');
   const [vocPerformanceStartDate, setVocPerformanceStartDate] = useState('');
   const [vocPerformanceEndDate, setVocPerformanceEndDate] = useState('');
   const [vocPerformanceSortFilter, setVocPerformanceSortFilter] = useState('rateDesc');
@@ -1485,14 +1516,7 @@ export default function Dashboard() {
     return vocDateFilteredRows
       .filter((v) => v.completedContent.includes('부품교체'))
       .map((v) => {
-        const detectedParts = Object.entries(PART_PATTERNS)
-          .filter(([name, regex]) => {
-            if (name === '충전기') {
-              return isValidChargerReplacement(v.completedContent);
-            }
-            return regex.test(v.completedContent);
-          })
-          .map(([name]) => name);
+        const detectedParts = extractPartNamesFromContent(v.completedContent);
 
         if (detectedParts.length === 0) return null;
 
@@ -1502,6 +1526,7 @@ export default function Dashboard() {
           siteName: v.siteName || '-',
           completedAtText: formatDate(v.completedAt),
           usedParts: detectedParts.join(', '),
+          summaryContent: summarizeAfterContent(v.completedContent),
           fullContent: v.completedContent,
         };
       })
@@ -1524,6 +1549,79 @@ export default function Dashboard() {
       .filter(([, count]) => count > 0)
       .sort((a, b) => b[1] - a[1]);
   }, [partUsageRows]);
+
+  const vocPartCompareRange = useMemo(() => {
+    if (!vocPartStartDate || !vocPartEndDate) return { start: null, end: null, label: '비교기간 미선택' };
+
+    const selectedStart = new Date(`${vocPartStartDate}T00:00:00`);
+    const selectedEnd = new Date(`${vocPartEndDate}T23:59:59`);
+
+    if (Number.isNaN(selectedStart.getTime()) || Number.isNaN(selectedEnd.getTime())) {
+      return { start: null, end: null, label: '비교기간 미선택' };
+    }
+
+    let compareStart = new Date(selectedStart);
+    let compareEnd = new Date(selectedEnd);
+
+    if (vocPartCompareMode === 'previousWeek') {
+      compareStart.setDate(compareStart.getDate() - 7);
+      compareEnd.setDate(compareEnd.getDate() - 7);
+    } else if (vocPartCompareMode === 'previousMonth') {
+      compareStart.setMonth(compareStart.getMonth() - 1);
+      compareEnd.setMonth(compareEnd.getMonth() - 1);
+    } else {
+      const periodMs = selectedEnd.getTime() - selectedStart.getTime() + 1;
+      compareEnd = new Date(selectedStart.getTime() - 1);
+      compareStart = new Date(compareEnd.getTime() - periodMs + 1);
+    }
+
+    return {
+      start: compareStart,
+      end: compareEnd,
+      label: `${formatDate(compareStart).slice(0, 10)} ~ ${formatDate(compareEnd).slice(0, 10)}`,
+    };
+  }, [vocPartStartDate, vocPartEndDate, vocPartCompareMode]);
+
+  const vocPartComparisonStats = useMemo(() => {
+    if (!vocPartCompareRange.start || !vocPartCompareRange.end) return [];
+
+    const currentCounts = {};
+    const compareCounts = {};
+    Object.keys(PART_PATTERNS).forEach((name) => {
+      currentCounts[name] = 0;
+      compareCounts[name] = 0;
+    });
+
+    partUsageRows.forEach((row) => {
+      row.usedParts.split(', ').forEach((part) => {
+        currentCounts[part] = (currentCounts[part] || 0) + 1;
+      });
+    });
+
+    vocRows.forEach((v) => {
+      if (!v.isCompleted || v.completedOrg !== 'EV세상' || !v.completedAt) return;
+      if (v.completedAt < vocPartCompareRange.start || v.completedAt > vocPartCompareRange.end) return;
+      if (!v.completedContent.includes('부품교체')) return;
+
+      extractPartNamesFromContent(v.completedContent).forEach((part) => {
+        compareCounts[part] = (compareCounts[part] || 0) + 1;
+      });
+    });
+
+    return Object.keys(PART_PATTERNS)
+      .map((part) => {
+        const current = currentCounts[part] || 0;
+        const compare = compareCounts[part] || 0;
+        const diff = current - compare;
+        const rate = compare > 0 ? Math.round((diff / compare) * 1000) / 10 : current > 0 ? 100 : 0;
+        return { part, current, compare, diff, rate };
+      })
+      .filter((row) => row.current > 0 || row.compare > 0)
+      .sort((a, b) => {
+        const diff = Math.abs(b.diff) - Math.abs(a.diff);
+        return diff !== 0 ? diff : b.current - a.current;
+      });
+  }, [vocRows, partUsageRows, vocPartCompareRange]);
 
   const downloadDetailsExcel = () => {
     const exportRows = sortedFilteredRows.map((row) => ({
@@ -1581,6 +1679,7 @@ export default function Dashboard() {
     setOrgFilter('EV세상');
     setVocPartStartDate('');
     setVocPartEndDate('');
+    setVocPartCompareMode('samePeriod');
     setVocPerformanceStartDate('');
     setVocPerformanceEndDate('');
     setVocPerformanceSortFilter('rateDesc');
@@ -2013,13 +2112,43 @@ export default function Dashboard() {
 
               <div style={styles.panel}>
                 <div style={styles.sectionTitle}>부품 교체 기간 조회</div>
-                <div style={styles.dateFilterRow}>
+                <div style={styles.dateFilterRow3}>
                   <input type="date" style={styles.input} value={vocPartStartDate} onChange={(e) => setVocPartStartDate(e.target.value)} />
                   <input type="date" style={styles.input} value={vocPartEndDate} onChange={(e) => setVocPartEndDate(e.target.value)} />
+                  <select style={styles.select} value={vocPartCompareMode} onChange={(e) => setVocPartCompareMode(e.target.value)}>
+                    <option value="samePeriod">비교: 동일 기간 대비</option>
+                    <option value="previousWeek">비교: 전주 대비</option>
+                    <option value="previousMonth">비교: 전월 대비</option>
+                  </select>
                 </div>
                 <div style={{ color: COLORS.sub, fontSize: 13, marginTop: 8 }}>
-                  완료일시 기준 (VOC 엑셀 R열)으로 필터합니다.
+                  완료일시 기준 (VOC 엑셀 R열)으로 필터합니다. 비교기간: {vocPartCompareRange.label}
                 </div>
+              </div>
+
+              <div style={styles.panel}>
+                <div style={styles.sectionTitleRow}>
+                  <div>
+                    <div style={styles.sectionTitleNoMargin}>부품 사용 비교 요약</div>
+                    <div style={styles.sectionSubText}>선택기간 사용량과 비교기간 사용량을 부품별로 비교합니다.</div>
+                  </div>
+                </div>
+                {vocPartComparisonStats.length === 0 ? (
+                  <div style={{ color: COLORS.sub }}>기간을 선택하면 부품별 증감 현황이 표시됩니다.</div>
+                ) : (
+                  <div style={styles.partCompareGrid}>
+                    {vocPartComparisonStats.map((item) => (
+                      <div key={item.part} style={styles.partCompareCard}>
+                        <div style={styles.partCompareTitle}>{item.part}</div>
+                        <div style={styles.partCompareMain}>{item.current.toLocaleString()}건</div>
+                        <div style={styles.partCompareSub}>비교기간 {item.compare.toLocaleString()}건</div>
+                        <div style={{ ...styles.partCompareDiff, color: item.diff > 0 ? COLORS.red : item.diff < 0 ? COLORS.blue : COLORS.slate }}>
+                          {item.diff > 0 ? '▲' : item.diff < 0 ? '▼' : '━'} {item.diff > 0 ? '+' : ''}{item.diff.toLocaleString()}건 ({item.rate}%)
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div style={styles.panel}>
@@ -2064,7 +2193,7 @@ export default function Dashboard() {
                           <td>{row.siteName || '-'}</td>
                           <td>{row.completedAtText}</td>
                           <td>{row.usedParts}</td>
-                          <td>{row.fullContent}</td>
+                          <td style={styles.compactContentCell} title={row.fullContent || '-'}>{row.summaryContent || '-'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2646,7 +2775,22 @@ const styles = {
   },
   vocLayout: { display: 'grid', gap: 16 },
   dateFilterRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
-  partSummaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 },
+  dateFilterRow3: { display: 'grid', gridTemplateColumns: '1fr 1fr 1.2fr', gap: 12 },
+  partSummaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 },
+  partCompareGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 },
+  partCompareCard: {
+    background: '#f8fbff',
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 18,
+    padding: 16,
+    display: 'grid',
+    gap: 8,
+  },
+  partCompareTitle: { color: COLORS.slate, fontSize: 14, fontWeight: 900 },
+  partCompareMain: { color: COLORS.text, fontSize: 26, fontWeight: 900, letterSpacing: '-0.02em' },
+  partCompareSub: { color: COLORS.sub, fontSize: 13, fontWeight: 700 },
+  partCompareDiff: { fontSize: 14, fontWeight: 900 },
+  compactContentCell: { whiteSpace: 'pre-line', lineHeight: 1.55, fontSize: 13, color: COLORS.slate },
   vocHeroPanel: {
     background: 'linear-gradient(135deg, #ffffff 0%, #eef6ff 52%, #f3edff 100%)',
     border: `1px solid ${COLORS.border}`,

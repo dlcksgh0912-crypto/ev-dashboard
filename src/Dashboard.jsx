@@ -128,8 +128,97 @@ const PART_PATTERNS = {
   '피닉스 케이블': /피닉스[-_\s]?케이블/i,
 };
 
+
+const MODEL_TYPE_MAP = {
+  'EVL-1C07027A01': '에버온_구형대',
+  'EVL-1C07027A01_미사용': '에버온_구형대',
+  'EVL-1107027A01': '에버온_신형대',
+  'EVL-1107020C01': '에버온_신형소C01',
+  'EVL-1107020F01': '에버온_신형소F01',
+  'EVL-10073N': '에버온_73N+',
+  'EVL-1103000901': '에버온_3kW',
+  'EVL-3J1002A01': '에버온_10kW',
+  'EVL-3J1002B01': '에버온_10kW',
+  'UK-NC7W-ST7-CH': '알박_구형',
+  'UK-NC7W-TC/E-AB': '알박_구형',
+  'UK-NC7W-TC/E-CH': '알박_구형',
+  'UK-NC7W-TC/E-LE': '알박_구형',
+  'UK-NC7W-TC/E-SC': '알박_구형',
+  'UK-NC7W-TC/E-ST5': '알박_구형',
+  'UK-NC7S01-002': '알박_신형',
+  'UK-QC50ST': '알박_급속',
+  'SC7K-F-WT-G2': '시그넷_완속',
+  'FC100K-B2-PS-G5': '시그넷_급속',
+  'FC200K-B2-PS-G2': '시그넷_급속',
+  'CPT11C1-ETW': '이카플러그_완속',
+  'CPT22C2-ETW': '이카플러그_완속',
+  'CPW102AS': '이카플러그_완속',
+  'CPW102B': '이카플러그_완속',
+  'S0L140AA02A021': '스필_완속_양팔형',
+  'S0L1401A02A021': '스필_완속_양팔형',
+  'S0F500DC02A031': '스필_완속',
+  'S0L0701A01A021': '스필_완속',
+  'S0W0701A011011': '스필_완속',
+  'S0F500BDC1A031': '스필_급속',
+  'S0W0701A01A011': '스필_완속',
+  'SVI0L07VBCCB2107005': '스필_완속',
+  'SOL0701A01A021': '스필_완속',
+  'SOL1401A02A021': '스필_완속',
+  'SOL140AA02A021': '스필_완속',
+  'SOW0701A011011': '스필_완속',
+  'SOW0701A01A011': '스필_완속',
+  'SOF101DC02A031': '스필_급속',
+  'SOF500BDC1A031': '스필_급속',
+  'SOF500DC02A031': '스필_급속',
+  'SOF500DD02A031': '스필_급속',
+  'SOF101DD02A031': '스필_급속',
+  'SVI-0F': '스필_급속',
+  'SVI-0F_OCPP': '스필_급속',
+  'S0F101DD02A031': '스필_급속',
+  'S0F500DD02A031': '스필_급속',
+  'S0F101DC02A031': '스필_급속',
+  'EVS_21S_L': 'PNE_완속',
+  'MAXERO-007SC-1AT8R': 'PNE_완속',
+  'MAXERO-200QC': 'PNE_급속',
+  'DP150C2-2C': 'PNE_급속',
+  'EVQ-11S-LHW': 'PNE_급속',
+  'EVQ-2FS-100B': 'PNE_급속',
+  'EVQ-1AS-100B': 'PNE_급속',
+  'EVQ-31S-LHP': 'PNE_급속',
+  'EVQ-31S-LHW_LEGACY': 'PNE_급속',
+  'EVQ-31S-LHW_OCPP': 'PNE_급속',
+  'JC-6511JA-PP-BC': '중앙제어_완속',
+  'JC-6111JA-PP-BC': '중앙제어_완속',
+  'JC-6933-TM': '중앙제어_급속',
+  'AM-FCD-200-02': '애플망고_급속',
+  'AM-FCD-200-02_OCPP': '애플망고_급속',
+  'CFC-0510BR1': '코스텔_급속',
+  'CEC-0510BR1': '코스텔_급속',
+  'SFC-D101D-330': '그린파워_급속',
+  'SFC-S050S-300': '그린파워_급속',
+};
+
 function normalizeText(value) {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+
+function normalizeModelName(value) {
+  return normalizeText(value).toUpperCase();
+}
+
+function getChargerType(modelName) {
+  const normalized = normalizeModelName(modelName);
+  if (!normalized) return '기타/미매칭';
+
+  const exactKey = Object.keys(MODEL_TYPE_MAP).find((key) => normalizeModelName(key) === normalized);
+  if (exactKey) return MODEL_TYPE_MAP[exactKey];
+
+  const partialKey = Object.keys(MODEL_TYPE_MAP)
+    .sort((a, b) => b.length - a.length)
+    .find((key) => normalized.includes(normalizeModelName(key)) || normalizeModelName(key).includes(normalized));
+
+  return partialKey ? MODEL_TYPE_MAP[partialKey] : '기타/미매칭';
 }
 
 function isValidChargerReplacement(text) {
@@ -423,7 +512,12 @@ function mapRawColumns(headerRow) {
     usageCount: findHeaderIndex(headers, ['누적 사용량', '누적사용량']),
     address: findHeaderIndex(headers, ['주소']),
     detailAddress: findHeaderIndex(headers, ['상세주소']),
-    siteId: findHeaderIndex(headers, ['충전소ID', '충전소 Id', '충전소 id', '사이트ID', 'site_id']),
+    siteId: findHeaderIndex(headers, ['충전소ID', '충전소 Id', '충전소 id', '사이트ID', 'site_id']) >= 0
+      ? findHeaderIndex(headers, ['충전소ID', '충전소 Id', '충전소 id', '사이트ID', 'site_id'])
+      : 0,
+    modelName: findHeaderIndex(headers, ['모델명', '모델 명', 'model']) >= 0
+      ? findHeaderIndex(headers, ['모델명', '모델 명', 'model'])
+      : 29, // 상태정보 리스트 AD열
   };
 }
 
@@ -445,6 +539,8 @@ function parseRawFile(file, rows) {
       const address = col.address >= 0 ? normalizeText(row[col.address]) : '';
       const detailAddress = col.detailAddress >= 0 ? normalizeText(row[col.detailAddress]) : '';
       const siteId = col.siteId >= 0 ? normalizeText(row[col.siteId]) : '';
+      const modelName = col.modelName >= 0 ? normalizeText(row[col.modelName]) : '';
+      const chargerType = getChargerType(modelName);
       const hasCollectedAt = !!collectedAt;
 
       const isManualOff = normalizeText(siteStatus) === '임의 OFF';
@@ -475,6 +571,8 @@ function parseRawFile(file, rows) {
         usageCount,
         address,
         detailAddress,
+        modelName,
+        chargerType,
         isApprovalPending,
         isNormalOperation,
         isFault,
@@ -858,14 +956,21 @@ function SearchStatusTag({ row }) {
   return <span style={styles.tagBlue}>● 정상 운영</span>;
 }
 
-function StatCard({ title, value, sub }) {
+function StatCard({ title, value, sub, onClick }) {
   const meta = statusMeta(title);
   return (
     <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === 'Enter' || e.key === ' ')) onClick();
+      }}
       style={{
         ...styles.card,
         border: `1px solid ${meta.accent}55`,
         boxShadow: COLORS.shadow,
+        cursor: onClick ? 'pointer' : 'default',
       }}
     >
       <div style={styles.cardTopRow}>
@@ -976,6 +1081,7 @@ export default function Dashboard() {
   const [vocPerformanceEndDate, setVocPerformanceEndDate] = useState('');
   const [vocPerformanceSortFilter, setVocPerformanceSortFilter] = useState('rateDesc');
   const [isRestoring, setIsRestoring] = useState(true);
+  const [summaryModalType, setSummaryModalType] = useState(null);
 
   const [profiles, setProfiles] = useState([]);
   const [profilesLoading, setProfilesLoading] = useState(false);
@@ -1317,6 +1423,92 @@ export default function Dashboard() {
       evPending,
     };
   }, [mergedRows, vocRows]);
+
+  const getRowsForSummaryType = (type) => {
+    if (type === 'fault') return mergedRows.filter((row) => row.isFault);
+    if (type === 'manualOff') return mergedRows.filter((row) => row.faultType === '임의 OFF');
+    if (type === 'vocPending') return mergedRows.filter((row) => row.faultType === 'VOC 조치 예정');
+    if (type === 'uninbound') return mergedRows.filter((row) => row.faultType === '미인입 고장');
+    if (type === 'replacement') return mergedRows.filter((row) => row.faultType === '교체 예정');
+    return [];
+  };
+
+  const summaryModalData = useMemo(() => {
+    if (!summaryModalType) return null;
+
+    const rows = getRowsForSummaryType(summaryModalType);
+    const typeLabelMap = {
+      fault: '고장 충전기',
+      vocPending: 'VOC 조치 예정',
+      uninbound: '미인입 고장',
+      replacement: '교체 예정',
+      manualOff: '임의 OFF',
+    };
+
+    const goFilterMap = {
+      fault: 'fault',
+      vocPending: 'VOC 조치 예정',
+      uninbound: '미인입 고장',
+      replacement: '교체 예정',
+      manualOff: '임의 OFF',
+    };
+
+    const countBy = (items, getKey) => {
+      const map = new Map();
+      items.forEach((item) => {
+        const key = getKey(item) || '기타/미매칭';
+        map.set(key, (map.get(key) || 0) + 1);
+      });
+      return Array.from(map.entries())
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    };
+
+    const modelCounts = countBy(rows, (row) => row.chargerType || getChargerType(row.modelName));
+    const siteMap = new Map();
+
+    rows.forEach((row) => {
+      const siteKey = row.siteId || row.siteName || '사이트 미기재';
+      if (!siteMap.has(siteKey)) {
+        siteMap.set(siteKey, {
+          siteId: row.siteId || '-',
+          siteName: row.siteName || '-',
+          address: shortAddress(row.address),
+          chargerCount: 0,
+        });
+      }
+      siteMap.get(siteKey).chargerCount += 1;
+    });
+
+    const siteRows = Array.from(siteMap.values())
+      .sort((a, b) => b.chargerCount - a.chargerCount || String(a.siteName).localeCompare(String(b.siteName)));
+
+    return {
+      type: summaryModalType,
+      title: typeLabelMap[summaryModalType] || '요약',
+      rows,
+      totalCount: rows.length,
+      uniqueSiteCount: siteRows.length,
+      modelCounts,
+      siteRows,
+      goFilter: goFilterMap[summaryModalType] || 'all',
+    };
+  }, [summaryModalType, mergedRows]);
+
+  const openSummaryModal = (type) => {
+    setSummaryModalType(type);
+  };
+
+  const closeSummaryModal = () => {
+    setSummaryModalType(null);
+  };
+
+  const goSummaryDetails = () => {
+    if (!summaryModalData) return;
+    setFaultFilter(summaryModalData.goFilter);
+    setTab('details');
+    closeSummaryModal();
+  };
 
   const filteredRows = useMemo(() => {
     return mergedRows.filter((row) => {
@@ -1683,6 +1875,7 @@ export default function Dashboard() {
     setVocPerformanceStartDate('');
     setVocPerformanceEndDate('');
     setVocPerformanceSortFilter('rateDesc');
+    setSummaryModalType(null);
   };
 
   const navItems = [
@@ -1813,22 +2006,24 @@ export default function Dashboard() {
                   sub="수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하"
                 />
                 <StatCard title="정상 운영" value={`${dashboard.normalOperation.toLocaleString()}기`} sub="전체 충전기 - 승인대기" />
-                <StatCard title="고장 충전기" value={`${dashboard.faultCount.toLocaleString()}기`} sub={`고장률 ${dashboard.faultRate}%`} />
+                <StatCard title="고장 충전기" value={`${dashboard.faultCount.toLocaleString()}기`} sub={`고장률 ${dashboard.faultRate}%`} onClick={() => openSummaryModal('fault')} />
                 <StatCard
                   title="VOC 조치 예정"
                   value={`${dashboard.vocPending.toLocaleString()}기`}
                   sub={`재발생 ${dashboard.vocRecurring.toLocaleString()}기 / 재인입 ${dashboard.vocReinbound.toLocaleString()}기`}
+                  onClick={() => openSummaryModal('vocPending')}
                 />
                 <StatCard
                   title="미인입 고장"
                   value={`${dashboard.uninbound.toLocaleString()}기`}
                   sub="임의 OFF / VOC 조치 예정 / 교체 예정 제외"
+                  onClick={() => openSummaryModal('uninbound')}
                 />
               </div>
 
               <div style={styles.middleGrid}>
-                <StatCard title="교체 예정" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" />
-                <StatCard title="임의 OFF" value={`${dashboard.manualOff.toLocaleString()}기`} sub="충전기 중 충전상태 기준" />
+                <StatCard title="교체 예정" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" onClick={() => openSummaryModal('replacement')} />
+                <StatCard title="임의 OFF" value={`${dashboard.manualOff.toLocaleString()}기`} sub="충전기 중 충전상태 기준" onClick={() => openSummaryModal('manualOff')} />
                 <div style={styles.panel}>
                   <div style={styles.sectionTitle}>고장 분류</div>
                   <DonutChart dashboard={dashboard} />
@@ -2303,6 +2498,112 @@ export default function Dashboard() {
             </div>
           )}
         </main>
+      </div>
+
+      {summaryModalData && (
+        <SummaryModal
+          data={summaryModalData}
+          onClose={closeSummaryModal}
+          onGoDetails={goSummaryDetails}
+        />
+      )}
+    </div>
+  );
+}
+
+
+function SummaryModal({ data, onClose, onGoDetails }) {
+  const isManualOff = data.type === 'manualOff';
+  const mainList = isManualOff ? data.siteRows : data.modelCounts;
+  const subList = isManualOff ? data.modelCounts : data.siteRows.slice(0, 8);
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modalBox} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div>
+            <div style={styles.modalEyebrow}>SUMMARY</div>
+            <div style={styles.modalTitle}>{data.title} 요약</div>
+            <div style={styles.modalSubText}>카드 기준 데이터를 빠르게 확인합니다.</div>
+          </div>
+          <button style={styles.modalCloseButton} onClick={onClose}>×</button>
+        </div>
+
+        <div style={styles.modalKpiGrid}>
+          <div style={styles.modalKpiCard}>
+            <div style={styles.modalKpiLabel}>총 충전기</div>
+            <div style={styles.modalKpiValue}>{data.totalCount.toLocaleString()}기</div>
+          </div>
+          <div style={styles.modalKpiCard}>
+            <div style={styles.modalKpiLabel}>영향 사이트</div>
+            <div style={styles.modalKpiValue}>{data.uniqueSiteCount.toLocaleString()}개소</div>
+          </div>
+          <div style={styles.modalKpiCard}>
+            <div style={styles.modalKpiLabel}>{isManualOff ? '주요 기준' : '모델 분류'}</div>
+            <div style={styles.modalKpiValue}>{mainList.length.toLocaleString()}종</div>
+          </div>
+        </div>
+
+        <div style={styles.modalContentGrid}>
+          <div style={styles.modalSectionBox}>
+            <div style={styles.modalSectionTitle}>{isManualOff ? '사이트별 수량' : '모델별 수량'}</div>
+            <div style={styles.modalListWrap}>
+              {mainList.length === 0 ? (
+                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+              ) : (
+                mainList.slice(0, 12).map((item, idx) => {
+                  const label = isManualOff ? item.siteName || '-' : item.name;
+                  const siteId = isManualOff && item.siteId && item.siteId !== '-' ? item.siteId : '';
+                  const count = isManualOff ? item.chargerCount : item.count;
+                  const percent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
+                  return (
+                    <div key={`${label}-${idx}`} style={styles.modalListItem}>
+                      <div style={styles.modalListTop}>
+                        <div style={styles.modalListTextBlock}>
+                          <div style={styles.modalListName}>{label}</div>
+                          {siteId && <div style={styles.modalListId}>({siteId})</div>}
+                        </div>
+                        <div style={styles.modalListCount}>{count.toLocaleString()}기</div>
+                      </div>
+                      <div style={styles.modalBarTrack}>
+                        <div style={{ ...styles.modalBarFill, width: `${Math.min(percent, 100)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          <div style={styles.modalSectionBox}>
+            <div style={styles.modalSectionTitle}>{isManualOff ? '모델 참고' : '사이트 TOP 8'}</div>
+            <div style={styles.modalMiniList}>
+              {subList.length === 0 ? (
+                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+              ) : (
+                subList.map((item, idx) => {
+                  const label = isManualOff ? item.name : item.siteName || '-';
+                  const siteId = !isManualOff && item.siteId && item.siteId !== '-' ? item.siteId : '';
+                  const count = isManualOff ? item.count : item.chargerCount;
+                  return (
+                    <div key={`${label}-${idx}`} style={styles.modalMiniItem}>
+                      <div style={styles.modalMiniTextBlock}>
+                        <div style={styles.modalMiniName}>{idx + 1}. {label}</div>
+                        {siteId && <div style={styles.modalMiniId}>({siteId})</div>}
+                      </div>
+                      <div style={styles.modalMiniCount}>{count.toLocaleString()}기</div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={styles.modalFooter}>
+          <button style={styles.secondaryButton} onClick={onClose}>닫기</button>
+          <button style={styles.primarySmallButton} onClick={onGoDetails}>상세내역 보기</button>
+        </div>
       </div>
     </div>
   );
@@ -2863,5 +3164,98 @@ const styles = {
   rateTrack: { height: 10, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' },
   rateFill: { height: '100%', borderRadius: 999, background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})` },
   actionButtonWrap: { display: 'flex', gap: 8, justifyContent: 'center' },
+  modalOverlay: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(15, 23, 42, 0.38)',
+    backdropFilter: 'blur(5px)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+    padding: 24,
+  },
+  modalBox: {
+    width: 'min(920px, 100%)',
+    maxHeight: '88vh',
+    overflowY: 'auto',
+    background: COLORS.panel,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 26,
+    boxShadow: '0 24px 70px rgba(15, 23, 42, 0.22)',
+    padding: 24,
+  },
+  modalHeader: { display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', marginBottom: 18 },
+  modalEyebrow: { color: COLORS.blue, fontSize: 12, fontWeight: 900, letterSpacing: '0.12em', marginBottom: 6 },
+  modalTitle: { fontSize: 24, fontWeight: 900, letterSpacing: '-0.03em' },
+  modalSubText: { color: COLORS.sub, fontSize: 13, marginTop: 8 },
+  modalCloseButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    border: `1px solid ${COLORS.border}`,
+    background: COLORS.panelSoft,
+    color: COLORS.slate,
+    fontSize: 24,
+    lineHeight: 1,
+    cursor: 'pointer',
+    fontWeight: 800,
+  },
+  modalKpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 16 },
+  modalKpiCard: {
+    background: '#f8fbff',
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 18,
+    padding: 16,
+  },
+  modalKpiLabel: { color: COLORS.sub, fontSize: 13, fontWeight: 800, marginBottom: 8 },
+  modalKpiValue: { color: COLORS.text, fontSize: 26, fontWeight: 900, letterSpacing: '-0.02em' },
+  modalContentGrid: { display: 'grid', gridTemplateColumns: '0.85fr 1.15fr', gap: 14 },
+  modalSectionBox: {
+    background: '#fff',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 20,
+    padding: 18,
+  },
+  modalSectionTitle: { fontSize: 16, fontWeight: 900, marginBottom: 14 },
+  modalListWrap: { display: 'grid', gap: 12 },
+  modalListItem: { display: 'grid', gap: 8 },
+  modalListTop: { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', fontSize: 14 },
+  modalListTextBlock: { minWidth: 0, flex: 1 },
+  modalListName: { color: COLORS.slate, fontWeight: 900, lineHeight: 1.35, wordBreak: 'keep-all' },
+  modalListId: { marginTop: 4, fontSize: 12, color: COLORS.sub, fontWeight: 800 },
+  modalListCount: { fontWeight: 900, color: COLORS.text, whiteSpace: 'nowrap', minWidth: 42, textAlign: 'right', flexShrink: 0 },
+  modalBarTrack: { height: 9, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' },
+  modalBarFill: { height: '100%', borderRadius: 999, background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})` },
+  modalMiniList: { display: 'grid', gap: 10 },
+  modalMiniItem: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+    background: '#f8fbff',
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 12,
+    padding: '11px 12px',
+    color: COLORS.slate,
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  modalMiniTextBlock: { minWidth: 0, flex: 1 },
+  modalMiniName: { fontWeight: 900, color: COLORS.slate, lineHeight: 1.35, wordBreak: 'keep-all' },
+  modalMiniId: { marginTop: 4, fontSize: 12, color: COLORS.sub, fontWeight: 800 },
+  modalMiniCount: { fontWeight: 900, color: COLORS.slate, whiteSpace: 'nowrap', minWidth: 38, textAlign: 'right', flexShrink: 0 },
+  modalEmpty: { color: COLORS.sub, fontSize: 14, padding: 12, background: '#f8fbff', borderRadius: 12 },
+  modalFooter: { display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 },
+  primarySmallButton: {
+    background: COLORS.blue,
+    color: '#fff',
+    border: 'none',
+    padding: '10px 14px',
+    borderRadius: 12,
+    cursor: 'pointer',
+    fontWeight: 800,
+    boxShadow: '0 8px 18px rgba(29, 99, 233, 0.20)',
+  },
 };
 

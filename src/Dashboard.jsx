@@ -1718,6 +1718,7 @@ export default function Dashboard() {
         table th { background: #f8fbff; color: #50627d; font-weight: 900; text-align: left; padding: 12px 12px; border-bottom: 1px solid #e6edf5; white-space: nowrap; }
         table td { padding: 12px 12px; border-bottom: 1px solid #eef2f7; color: #0f172a; vertical-align: middle; line-height: 1.45; }
         table tbody tr:hover { background: #f8fbff; }
+        table.detail-scroll-table th { position: sticky; top: 0; z-index: 2; box-shadow: 0 1px 0 #e6edf5; }
       `}</style>
       <div style={styles.appShell}>
         <aside style={styles.sidebar}>
@@ -1933,8 +1934,8 @@ export default function Dashboard() {
                 </select>
               </div>
 
-              <div style={styles.tableWrap}>
-                <table style={styles.table}>
+              <div style={styles.detailTableWrap}>
+                <table className="detail-scroll-table" style={styles.table}>
                   <thead>
                     <tr>
                       <th style={{ width: '12%' }}>충전기 ID</th>
@@ -2708,6 +2709,7 @@ const styles = {
     alignItems: 'center',
   },
   tableWrap: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 16 },
+  detailTableWrap: { overflow: 'auto', maxHeight: 760, border: `1px solid ${COLORS.border}`, borderRadius: 16 },
   table: { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 13 },
   statusCell: { whiteSpace: 'nowrap', minWidth: 92 },
   statusNowrap: { display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap', fontWeight: 900, fontSize: 13 },

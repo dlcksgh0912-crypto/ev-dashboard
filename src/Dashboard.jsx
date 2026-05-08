@@ -209,7 +209,7 @@ function normalizeModelName(value) {
 
 function getChargerType(modelName) {
   const normalized = normalizeModelName(modelName);
-  if (!normalized) return '기타/미매칭';
+  if (!normalized) return '기타';
 
   const exactKey = Object.keys(MODEL_TYPE_MAP).find((key) => normalizeModelName(key) === normalized);
   if (exactKey) return MODEL_TYPE_MAP[exactKey];
@@ -218,7 +218,7 @@ function getChargerType(modelName) {
     .sort((a, b) => b.length - a.length)
     .find((key) => normalized.includes(normalizeModelName(key)) || normalizeModelName(key).includes(normalized));
 
-  return partialKey ? MODEL_TYPE_MAP[partialKey] : '기타/미매칭';
+  return partialKey ? MODEL_TYPE_MAP[partialKey] : '기타';
 }
 
 function isValidChargerReplacement(text) {
@@ -1039,9 +1039,17 @@ function DonutChart({ dashboard }) {
         </div>
       </div>
       <div style={{ display: 'grid', gap: 10 }}>
-        {data.map((item) => (
-          <LegendItem key={item.name} name={item.name} value={`${item.value.toLocaleString()}기`} color={item.color} />
-        ))}
+        {data.map((item) => {
+          const percent = total > 0 ? Math.round((item.value / total) * 1000) / 10 : 0;
+          return (
+            <LegendItem
+              key={item.name}
+              name={item.name}
+              value={`${item.value.toLocaleString()}기 (${percent}%)`}
+              color={item.color}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -1426,6 +1434,7 @@ export default function Dashboard() {
 
   const getRowsForSummaryType = (type) => {
     if (type === 'fault') return mergedRows.filter((row) => row.isFault);
+    if (type === 'normal') return mergedRows.filter((row) => row.isNormalOperation);
     if (type === 'manualOff') return mergedRows.filter((row) => row.faultType === '임의 OFF');
     if (type === 'vocPending') return mergedRows.filter((row) => row.faultType === 'VOC 조치 예정');
     if (type === 'uninbound') return mergedRows.filter((row) => row.faultType === '미인입 고장');
@@ -1439,6 +1448,7 @@ export default function Dashboard() {
     const rows = getRowsForSummaryType(summaryModalType);
     const typeLabelMap = {
       fault: '고장 충전기',
+      normal: '정상 운영',
       vocPending: 'VOC 조치 예정',
       uninbound: '미인입 고장',
       replacement: '교체 예정',
@@ -1447,6 +1457,7 @@ export default function Dashboard() {
 
     const goFilterMap = {
       fault: 'fault',
+      normal: 'normal',
       vocPending: 'VOC 조치 예정',
       uninbound: '미인입 고장',
       replacement: '교체 예정',
@@ -1456,7 +1467,7 @@ export default function Dashboard() {
     const countBy = (items, getKey) => {
       const map = new Map();
       items.forEach((item) => {
-        const key = getKey(item) || '기타/미매칭';
+        const key = getKey(item) || '기타';
         map.set(key, (map.get(key) || 0) + 1);
       });
       return Array.from(map.entries())
@@ -1468,7 +1479,7 @@ export default function Dashboard() {
     const siteMap = new Map();
 
     rows.forEach((row) => {
-      const siteKey = row.siteId || row.siteName || '사이트 미기재';
+      const siteKey = row.siteId || '충전소ID 미기재';
       if (!siteMap.has(siteKey)) {
         siteMap.set(siteKey, {
           siteId: row.siteId || '-',
@@ -1483,6 +1494,14 @@ export default function Dashboard() {
     const siteRows = Array.from(siteMap.values())
       .sort((a, b) => b.chargerCount - a.chargerCount || String(a.siteName).localeCompare(String(b.siteName)));
 
+    const installedModelMap = new Map();
+    mergedRows.forEach((row) => {
+      const key = row.chargerType || getChargerType(row.modelName) || '기타';
+      installedModelMap.set(key, (installedModelMap.get(key) || 0) + 1);
+    });
+
+    const faultTotalCount = mergedRows.filter((row) => row.isFault).length;
+
     return {
       type: summaryModalType,
       title: typeLabelMap[summaryModalType] || '요약',
@@ -1491,6 +1510,8 @@ export default function Dashboard() {
       uniqueSiteCount: siteRows.length,
       modelCounts,
       siteRows,
+      installedModelMap,
+      faultTotalCount,
       goFilter: goFilterMap[summaryModalType] || 'all',
     };
   }, [summaryModalType, mergedRows]);
@@ -1525,7 +1546,9 @@ export default function Dashboard() {
             ? row.isFault
             : faultFilter === 'approval'
               ? row.isApprovalPending
-              : row.faultType === faultFilter;
+              : faultFilter === 'normal'
+                ? row.isNormalOperation
+                : row.faultType === faultFilter;
 
       const matchesRecurrence =
         recurrenceFilter === 'all'
@@ -2005,7 +2028,12 @@ export default function Dashboard() {
                   value={`${dashboard.approvalPending.toLocaleString()}기`}
                   sub="수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하"
                 />
-                <StatCard title="정상 운영" value={`${dashboard.normalOperation.toLocaleString()}기`} sub="전체 충전기 - 승인대기" />
+                <StatCard
+                  title="정상 운영"
+                  value={`${dashboard.normalOperation.toLocaleString()}기`}
+                  sub="전체 충전기 - 승인대기"
+                  onClick={() => openSummaryModal('normal')}
+                />
                 <StatCard title="고장 충전기" value={`${dashboard.faultCount.toLocaleString()}기`} sub={`고장률 ${dashboard.faultRate}%`} onClick={() => openSummaryModal('fault')} />
                 <StatCard
                   title="VOC 조치 예정"
@@ -2107,6 +2135,7 @@ export default function Dashboard() {
                   <option value="all">전체</option>
                   <option value="fault">고장전체</option>
                   <option value="approval">승인대기</option>
+                  <option value="normal">정상 운영</option>
                   <option value="임의 OFF">임의 OFF</option>
                   <option value="VOC 조치 예정">VOC 조치 예정</option>
                   <option value="교체 예정">교체 예정</option>
@@ -2513,18 +2542,29 @@ export default function Dashboard() {
 
 
 function SummaryModal({ data, onClose, onGoDetails }) {
+  const isNormal = data.type === 'normal';
   const isManualOff = data.type === 'manualOff';
-  const mainList = isManualOff ? data.siteRows : data.modelCounts;
-  const subList = isManualOff ? data.modelCounts : data.siteRows.slice(0, 8);
+  const isFaultLike = ['fault', 'vocPending', 'uninbound', 'replacement'].includes(data.type);
+
+  const modelRows = data.modelCounts || [];
+  const maxCount = Math.max(...modelRows.map((item) => item.count || 0), 1);
+
+  const headerBadge = isNormal ? '수량 / 비중' : '수량 / 설치대비 / 고장대비';
+  const description = isNormal
+    ? '정상 운영 충전기의 모델별 구성 비중을 확인합니다.'
+    : '모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.';
+
+  const getInstalledTotal = (modelName) => data.installedModelMap?.get?.(modelName) || 0;
+  const getFaultTotal = () => data.faultTotalCount || data.totalCount || 0;
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
-      <div style={styles.modalBox} onClick={(e) => e.stopPropagation()}>
+      <div style={styles.modelModalBox} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <div>
-            <div style={styles.modalEyebrow}>SUMMARY</div>
+            <div style={styles.modalEyebrow}>MODEL SUMMARY</div>
             <div style={styles.modalTitle}>{data.title} 요약</div>
-            <div style={styles.modalSubText}>카드 기준 데이터를 빠르게 확인합니다.</div>
+            <div style={styles.modalSubText}>{description}</div>
           </div>
           <button style={styles.modalCloseButton} onClick={onClose}>×</button>
         </div>
@@ -2535,69 +2575,91 @@ function SummaryModal({ data, onClose, onGoDetails }) {
             <div style={styles.modalKpiValue}>{data.totalCount.toLocaleString()}기</div>
           </div>
           <div style={styles.modalKpiCard}>
-            <div style={styles.modalKpiLabel}>영향 사이트</div>
+            <div style={styles.modalKpiLabel}>충전소 수량</div>
             <div style={styles.modalKpiValue}>{data.uniqueSiteCount.toLocaleString()}개소</div>
           </div>
           <div style={styles.modalKpiCard}>
-            <div style={styles.modalKpiLabel}>{isManualOff ? '주요 기준' : '모델 분류'}</div>
-            <div style={styles.modalKpiValue}>{mainList.length.toLocaleString()}종</div>
+            <div style={styles.modalKpiLabel}>모델 분류</div>
+            <div style={styles.modalKpiValue}>{modelRows.length.toLocaleString()}종</div>
           </div>
         </div>
 
-        <div style={styles.modalContentGrid}>
-          <div style={styles.modalSectionBox}>
-            <div style={styles.modalSectionTitle}>{isManualOff ? '사이트별 수량' : '모델별 수량'}</div>
-            <div style={styles.modalListWrap}>
-              {mainList.length === 0 ? (
-                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
-              ) : (
-                mainList.slice(0, 12).map((item, idx) => {
-                  const label = isManualOff ? item.siteName || '-' : item.name;
-                  const siteId = isManualOff && item.siteId && item.siteId !== '-' ? item.siteId : '';
-                  const count = isManualOff ? item.chargerCount : item.count;
-                  const percent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
-                  return (
-                    <div key={`${label}-${idx}`} style={styles.modalListItem}>
-                      <div style={styles.modalListTop}>
-                        <div style={styles.modalListTextBlock}>
-                          <div style={styles.modalListName}>{label}</div>
-                          {siteId && <div style={styles.modalListId}>({siteId})</div>}
-                        </div>
-                        <div style={styles.modalListCount}>{count.toLocaleString()}기</div>
-                      </div>
-                      <div style={styles.modalBarTrack}>
-                        <div style={{ ...styles.modalBarFill, width: `${Math.min(percent, 100)}%` }} />
-                      </div>
-                    </div>
-                  );
-                })
-              )}
+        <div style={styles.modelAnalysisBox}>
+          <div style={styles.modelAnalysisHeader}>
+            <div>
+              <div style={styles.modelAnalysisTitle}>모델별 분석</div>
+              <div style={styles.modelAnalysisDesc}>
+                {isNormal
+                  ? '모델별 수량과 정상 운영 전체 대비 비중입니다.'
+                  : '설치대비는 해당 모델 전체 설치 수량 대비 현재 카드 대상 수량 비율입니다.'}
+              </div>
             </div>
+            <div style={styles.modelAnalysisBadge}>{headerBadge}</div>
           </div>
 
-          <div style={styles.modalSectionBox}>
-            <div style={styles.modalSectionTitle}>{isManualOff ? '모델 참고' : '사이트 TOP 8'}</div>
-            <div style={styles.modalMiniList}>
-              {subList.length === 0 ? (
-                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
-              ) : (
-                subList.map((item, idx) => {
-                  const label = isManualOff ? item.name : item.siteName || '-';
-                  const siteId = !isManualOff && item.siteId && item.siteId !== '-' ? item.siteId : '';
-                  const count = isManualOff ? item.count : item.chargerCount;
-                  return (
-                    <div key={`${label}-${idx}`} style={styles.modalMiniItem}>
-                      <div style={styles.modalMiniTextBlock}>
-                        <div style={styles.modalMiniName}>{idx + 1}. {label}</div>
-                        {siteId && <div style={styles.modalMiniId}>({siteId})</div>}
+          <div style={styles.modelListWrap}>
+            {modelRows.length === 0 ? (
+              <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+            ) : (
+              modelRows.map((item, idx) => {
+                const count = item.count || 0;
+                const installedTotal = getInstalledTotal(item.name);
+                const normalPercent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
+                const installedRate = installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0;
+                const faultRate = getFaultTotal() > 0 ? Math.round((count / getFaultTotal()) * 1000) / 10 : 0;
+                const barPercent = Math.min((count / maxCount) * 100, 100);
+
+                return (
+                  <div key={`${item.name}-${idx}`} style={styles.modelRowCard}>
+                    <div style={styles.modelRank}>{idx + 1}</div>
+
+                    <div style={styles.modelNameBlock}>
+                      <div style={styles.modelName}>{item.name || '기타'}</div>
+                      <div style={styles.modelSub}>
+                        {isNormal
+                          ? `정상 운영 ${count.toLocaleString()}기 기준`
+                          : `설치 ${installedTotal.toLocaleString()}기 기준`}
                       </div>
-                      <div style={styles.modalMiniCount}>{count.toLocaleString()}기</div>
+                      <div style={styles.modelBarTrack}>
+                        <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
+                      </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
+
+                    <div style={isNormal ? styles.modelMetricGrid2 : styles.modelMetricGrid3}>
+                      <div style={styles.modelMetricBox}>
+                        <div style={styles.modelMetricLabel}>수량</div>
+                        <div style={styles.modelMetricValue}>{count.toLocaleString()}기</div>
+                      </div>
+
+                      {isNormal ? (
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>비중</div>
+                          <div style={styles.modelMetricValue}>{normalPercent}%</div>
+                        </div>
+                      ) : (
+                        <>
+                          <div style={styles.modelMetricBox}>
+                            <div style={styles.modelMetricLabel}>설치대비</div>
+                            <div style={styles.modelMetricValue}>{installedRate}%</div>
+                          </div>
+                          <div style={styles.modelMetricBox}>
+                            <div style={styles.modelMetricLabel}>고장대비</div>
+                            <div style={styles.modelMetricValue}>{faultRate}%</div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
+
+          {isFaultLike && (
+            <div style={styles.modelFootnote}>
+              ※ 수량은 해당 카드에 포함된 충전기 수량이며, 설치대비는 모델별 전체 설치 수량 대비 비율입니다.
+            </div>
+          )}
         </div>
 
         <div style={styles.modalFooter}>
@@ -3176,7 +3238,7 @@ const styles = {
     padding: 24,
   },
   modalBox: {
-    width: 'min(920px, 100%)',
+    width: 'min(1120px, 100%)',
     maxHeight: '88vh',
     overflowY: 'auto',
     background: COLORS.panel,
@@ -3210,7 +3272,7 @@ const styles = {
   },
   modalKpiLabel: { color: COLORS.sub, fontSize: 13, fontWeight: 800, marginBottom: 8 },
   modalKpiValue: { color: COLORS.text, fontSize: 26, fontWeight: 900, letterSpacing: '-0.02em' },
-  modalContentGrid: { display: 'grid', gridTemplateColumns: '0.85fr 1.15fr', gap: 14 },
+  modalContentGrid: { display: 'grid', gridTemplateColumns: '1fr', gap: 14 },
   modalSectionBox: {
     background: '#fff',
     border: `1px solid ${COLORS.border}`,
@@ -3219,12 +3281,12 @@ const styles = {
   },
   modalSectionTitle: { fontSize: 16, fontWeight: 900, marginBottom: 14 },
   modalListWrap: { display: 'grid', gap: 12 },
-  modalListItem: { display: 'grid', gap: 8 },
-  modalListTop: { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', fontSize: 14 },
+  modalListItem: { display: 'grid', gap: 8, background: '#f8fbff', border: `1px solid ${COLORS.line}`, borderRadius: 16, padding: '12px 14px' },
+  modalListTop: { display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) 330px', gap: 14, alignItems: 'center', fontSize: 14 },
   modalListTextBlock: { minWidth: 0, flex: 1 },
-  modalListName: { color: COLORS.slate, fontWeight: 900, lineHeight: 1.35, wordBreak: 'keep-all' },
+  modalListName: { color: COLORS.text, fontWeight: 900, lineHeight: 1.25, wordBreak: 'keep-all' },
   modalListId: { marginTop: 4, fontSize: 12, color: COLORS.sub, fontWeight: 800 },
-  modalListCount: { fontWeight: 900, color: COLORS.text, whiteSpace: 'nowrap', minWidth: 42, textAlign: 'right', flexShrink: 0 },
+  modalListCount: { fontWeight: 900, color: COLORS.text, whiteSpace: 'nowrap', minWidth: 92, textAlign: 'center', flexShrink: 0 },
   modalBarTrack: { height: 9, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' },
   modalBarFill: { height: '100%', borderRadius: 999, background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})` },
   modalMiniList: { display: 'grid', gap: 10 },
@@ -3244,7 +3306,7 @@ const styles = {
   modalMiniTextBlock: { minWidth: 0, flex: 1 },
   modalMiniName: { fontWeight: 900, color: COLORS.slate, lineHeight: 1.35, wordBreak: 'keep-all' },
   modalMiniId: { marginTop: 4, fontSize: 12, color: COLORS.sub, fontWeight: 800 },
-  modalMiniCount: { fontWeight: 900, color: COLORS.slate, whiteSpace: 'nowrap', minWidth: 38, textAlign: 'right', flexShrink: 0 },
+  modalMiniCount: { fontWeight: 900, color: COLORS.slate, whiteSpace: 'nowrap', minWidth: 78, textAlign: 'right', flexShrink: 0 },
   modalEmpty: { color: COLORS.sub, fontSize: 14, padding: 12, background: '#f8fbff', borderRadius: 12 },
   modalFooter: { display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 },
   primarySmallButton: {
@@ -3256,6 +3318,144 @@ const styles = {
     cursor: 'pointer',
     fontWeight: 800,
     boxShadow: '0 8px 18px rgba(29, 99, 233, 0.20)',
+  },
+  modelModalBox: {
+    width: 'min(1120px, 100%)',
+    maxHeight: '88vh',
+    overflowY: 'auto',
+    background: COLORS.panel,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 26,
+    boxShadow: '0 24px 70px rgba(15, 23, 42, 0.22)',
+    padding: 24,
+  },
+  modelAnalysisBox: {
+    background: '#fff',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 20,
+    padding: 18,
+  },
+  modelAnalysisHeader: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 14,
+    marginBottom: 16,
+  },
+  modelAnalysisTitle: {
+    fontSize: 17,
+    fontWeight: 900,
+    color: COLORS.text,
+    marginBottom: 8,
+  },
+  modelAnalysisDesc: {
+    color: COLORS.sub,
+    fontSize: 13,
+    lineHeight: 1.45,
+  },
+  modelAnalysisBadge: {
+    background: COLORS.blueSoft,
+    color: COLORS.blue,
+    border: `1px solid ${COLORS.blue}22`,
+    borderRadius: 999,
+    padding: '10px 14px',
+    fontSize: 13,
+    fontWeight: 900,
+    whiteSpace: 'nowrap',
+  },
+  modelListWrap: {
+    display: 'grid',
+    gap: 10,
+  },
+  modelRowCard: {
+    display: 'grid',
+    gridTemplateColumns: '34px minmax(260px, 1fr) auto',
+    gap: 14,
+    alignItems: 'center',
+    background: '#f8fbff',
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 16,
+    padding: '12px 12px',
+  },
+  modelRank: {
+    width: 24,
+    height: 24,
+    borderRadius: 999,
+    background: '#fff',
+    border: `1px solid ${COLORS.border}`,
+    color: COLORS.slate,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 12,
+    fontWeight: 900,
+  },
+  modelNameBlock: {
+    minWidth: 0,
+  },
+  modelName: {
+    color: COLORS.text,
+    fontSize: 16,
+    fontWeight: 900,
+    lineHeight: 1.25,
+    wordBreak: 'keep-all',
+  },
+  modelSub: {
+    color: COLORS.sub,
+    fontSize: 12,
+    fontWeight: 800,
+    marginTop: 5,
+    marginBottom: 8,
+  },
+  modelBarTrack: {
+    height: 7,
+    borderRadius: 999,
+    background: '#edf2f7',
+    overflow: 'hidden',
+  },
+  modelBarFill: {
+    height: '100%',
+    borderRadius: 999,
+    background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})`,
+  },
+  modelMetricGrid2: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 104px)',
+    gap: 8,
+  },
+  modelMetricGrid3: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, 104px)',
+    gap: 8,
+  },
+  modelMetricBox: {
+    background: '#fff',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 10,
+    padding: '9px 8px',
+    minHeight: 54,
+    display: 'grid',
+    alignContent: 'center',
+    textAlign: 'center',
+  },
+  modelMetricLabel: {
+    color: COLORS.slate,
+    fontSize: 12,
+    fontWeight: 900,
+    marginBottom: 5,
+    whiteSpace: 'nowrap',
+  },
+  modelMetricValue: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: 900,
+    whiteSpace: 'nowrap',
+  },
+  modelFootnote: {
+    color: COLORS.sub,
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 14,
   },
 };
 

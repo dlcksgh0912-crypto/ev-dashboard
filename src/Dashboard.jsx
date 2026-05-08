@@ -725,7 +725,7 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
     setMaxNumber(cumulativeBySite, v.matchSiteName, v.cumulativeCharge);
   }
 
-  return rawRows.map((row) => {
+  const classifiedRows = rawRows.map((row) => {
     const normalizedSiteName = normalizeSiteName(row.siteName);
 
     const pendingExact = pendingByExactId.get(row.chargerId) || [];
@@ -810,6 +810,53 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       isVocOverAbnormal,
       cumulativeCharge,
       recentHistory,
+    };
+  });
+
+  const siteGroupMap = new Map();
+
+  classifiedRows.forEach((row) => {
+    const siteKey = normalizeSiteName(row.siteName) || row.siteId || '충전소 미기재';
+    if (!siteGroupMap.has(siteKey)) siteGroupMap.set(siteKey, []);
+    siteGroupMap.get(siteKey).push(row);
+  });
+
+  const approvalOverrideSiteSet = new Set();
+
+  siteGroupMap.forEach((siteRows, siteKey) => {
+    if (!siteRows.length) return;
+
+    const isAllFault = siteRows.every((row) => row.isFault);
+    const isAllUninbound = siteRows.every((row) => row.faultType === '미인입 고장');
+    const isTargetMaker = siteRows.every((row) => {
+      const type = normalizeText(row.chargerType || getChargerType(row.modelName));
+      return type.startsWith('알박') || type.startsWith('이카플러그');
+    });
+
+    if (isAllFault && isAllUninbound && isTargetMaker) {
+      approvalOverrideSiteSet.add(siteKey);
+    }
+  });
+
+  return classifiedRows.map((row) => {
+    const siteKey = normalizeSiteName(row.siteName) || row.siteId || '충전소 미기재';
+
+    if (!approvalOverrideSiteSet.has(siteKey)) return row;
+
+    return {
+      ...row,
+      faultType: '',
+      isFault: false,
+      isFaultByCollected: false,
+      isManualOffFault: false,
+      isApprovalPending: true,
+      isNormalOperation: false,
+      recurrenceLabel: '-',
+      occurrenceCount: 0,
+      reinboundCount: 0,
+      partReplaceCount: 0,
+      isLongPending: false,
+      isVocOverAbnormal: false,
     };
   });
 }

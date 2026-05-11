@@ -2591,18 +2591,52 @@ export default function Dashboard() {
 function SummaryModal({ data, onClose, onGoDetails }) {
   const isNormal = data.type === 'normal';
   const isManualOff = data.type === 'manualOff';
-  const isFaultLike = ['fault', 'vocPending', 'uninbound', 'replacement'].includes(data.type);
+  const isFaultLike = ['fault', 'vocPending', 'uninbound', 'replacement', 'manualOff'].includes(data.type);
+  const [modelSortType, setModelSortType] = useState('faultRate');
 
   const modelRows = data.modelCounts || [];
   const maxCount = Math.max(...modelRows.map((item) => item.count || 0), 1);
 
-  const headerBadge = isNormal ? '수량 / 비중' : '수량 / 설치대비 / 고장대비';
+  const headerBadge = isNormal
+    ? '수량 / 비중'
+    : '수량 / 동일 기종 설치 대비 / 고장대비';
   const description = isNormal
     ? '정상 운영 충전기의 모델별 구성 비중을 확인합니다.'
     : '모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.';
 
   const getInstalledTotal = (modelName) => data.installedModelMap?.get?.(modelName) || 0;
   const getFaultTotal = () => data.faultTotalCount || data.totalCount || 0;
+
+  const sortedModelRows = useMemo(() => {
+    const withMetrics = modelRows.map((item, index) => {
+      const count = item.count || 0;
+      const installedTotal = getInstalledTotal(item.name);
+      const installedRate = installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0;
+      const faultRate = data.totalCount > 0
+        ? Math.round((count / data.totalCount) * 1000) / 10
+        : 0;
+
+      return {
+        ...item,
+        _originalIndex: index,
+        _installedTotal: installedTotal,
+        _installedRate: installedRate,
+        _faultRate: faultRate,
+      };
+    });
+
+    if (isNormal) return withMetrics;
+
+    return withMetrics.sort((a, b) => {
+      if (modelSortType === 'installedRate') {
+        const diff = (b._installedRate || 0) - (a._installedRate || 0);
+        return diff !== 0 ? diff : (b.count || 0) - (a.count || 0);
+      }
+
+      const diff = (b._faultRate || 0) - (a._faultRate || 0);
+      return diff !== 0 ? diff : (b.count || 0) - (a.count || 0);
+    });
+  }, [modelRows, data.totalCount, data.installedModelMap, modelSortType, isNormal]);
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
@@ -2618,15 +2652,15 @@ function SummaryModal({ data, onClose, onGoDetails }) {
 
         <div style={styles.modalKpiGrid}>
           <div style={styles.modalKpiCard}>
-            <div style={styles.modalKpiLabel}>총 충전기</div>
+            <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🔌</span>총 충전기</div>
             <div style={styles.modalKpiValue}>{data.totalCount.toLocaleString()}기</div>
           </div>
           <div style={styles.modalKpiCard}>
-            <div style={styles.modalKpiLabel}>충전소 수량</div>
+            <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🏢</span>충전소 수량</div>
             <div style={styles.modalKpiValue}>{data.uniqueSiteCount.toLocaleString()}개소</div>
           </div>
           <div style={styles.modalKpiCard}>
-            <div style={styles.modalKpiLabel}>모델 분류</div>
+            <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🍃</span>모델 분류</div>
             <div style={styles.modalKpiValue}>{modelRows.length.toLocaleString()}종</div>
           </div>
         </div>
@@ -2641,19 +2675,42 @@ function SummaryModal({ data, onClose, onGoDetails }) {
                   : '설치대비는 해당 모델 전체 설치 수량 대비 현재 카드 대상 수량 비율입니다.'}
               </div>
             </div>
-            <div style={styles.modelAnalysisBadge}>{headerBadge}</div>
+            <div style={styles.modelAnalysisHeaderRight}>
+              {!isNormal && (
+                <div style={styles.modelSortButtonRow}>
+                  <span style={styles.modelSortLabel}>정렬기준</span>
+                  <button
+                    type="button"
+                    style={modelSortType === 'installedRate' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setModelSortType('installedRate')}
+                  >
+                    동일 기종 설치 대비
+                  </button>
+                  <button
+                    type="button"
+                    style={modelSortType === 'faultRate' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setModelSortType('faultRate')}
+                  >
+                    고장대비
+                  </button>
+                </div>
+              )}
+              <div style={styles.modelAnalysisBadge}>{headerBadge}</div>
+            </div>
           </div>
 
           <div style={styles.modelListWrap}>
             {modelRows.length === 0 ? (
               <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
             ) : (
-              modelRows.map((item, idx) => {
+              sortedModelRows.map((item, idx) => {
                 const count = item.count || 0;
-                const installedTotal = getInstalledTotal(item.name);
+                const installedTotal = item._installedTotal ?? getInstalledTotal(item.name);
                 const normalPercent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
-                const installedRate = installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0;
-                const faultRate = getFaultTotal() > 0 ? Math.round((count / getFaultTotal()) * 1000) / 10 : 0;
+                const installedRate = item._installedRate ?? (installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0);
+                const faultRate = item._faultRate ?? (data.totalCount > 0
+                  ? Math.round((count / data.totalCount) * 1000) / 10
+                  : 0);
                 const barPercent = Math.min((count / maxCount) * 100, 100);
 
                 return (
@@ -2686,7 +2743,11 @@ function SummaryModal({ data, onClose, onGoDetails }) {
                       ) : (
                         <>
                           <div style={styles.modelMetricBox}>
-                            <div style={styles.modelMetricLabel}>설치대비</div>
+                            <div style={styles.modelMetricLabel}>
+                              동일 기종
+                              <br />
+                              설치 대비
+                            </div>
                             <div style={styles.modelMetricValue}>{installedRate}%</div>
                           </div>
                           <div style={styles.modelMetricBox}>
@@ -3312,12 +3373,14 @@ const styles = {
   },
   modalKpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 16 },
   modalKpiCard: {
-    background: '#f8fbff',
-    border: `1px solid ${COLORS.line}`,
+    background: 'linear-gradient(135deg, #ffffff 0%, #f1f8ff 100%)',
+    border: `1px solid ${COLORS.border}`,
     borderRadius: 18,
     padding: 16,
+    boxShadow: '0 10px 26px rgba(31, 125, 232, 0.08)',
   },
-  modalKpiLabel: { color: COLORS.sub, fontSize: 13, fontWeight: 800, marginBottom: 8 },
+  modalKpiLabel: { color: COLORS.sub, fontSize: 13, fontWeight: 800, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 7 },
+  modalKpiEmoji: { fontSize: 17, lineHeight: 1 },
   modalKpiValue: { color: COLORS.text, fontSize: 26, fontWeight: 900, letterSpacing: '-0.02em' },
   modalContentGrid: { display: 'grid', gridTemplateColumns: '1fr', gap: 14 },
   modalSectionBox: {
@@ -3370,17 +3433,18 @@ const styles = {
     width: 'min(1120px, 100%)',
     maxHeight: '88vh',
     overflowY: 'auto',
-    background: COLORS.panel,
+    background: 'linear-gradient(180deg, #ffffff 0%, #f7fbff 100%)',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 26,
-    boxShadow: '0 24px 70px rgba(15, 23, 42, 0.22)',
+    boxShadow: '0 26px 76px rgba(31, 125, 232, 0.20)',
     padding: 24,
   },
   modelAnalysisBox: {
-    background: '#fff',
+    background: 'linear-gradient(180deg, #ffffff 0%, #f9fcff 100%)',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 20,
     padding: 18,
+    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.9)',
   },
   modelAnalysisHeader: {
     display: 'flex',
@@ -3400,6 +3464,13 @@ const styles = {
     fontSize: 13,
     lineHeight: 1.45,
   },
+  modelAnalysisHeaderRight: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
   modelAnalysisBadge: {
     background: COLORS.blueSoft,
     color: COLORS.blue,
@@ -3410,6 +3481,40 @@ const styles = {
     fontWeight: 900,
     whiteSpace: 'nowrap',
   },
+  modelSortButtonRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  modelSortLabel: {
+    color: COLORS.sub,
+    fontSize: 12,
+    fontWeight: 900,
+    whiteSpace: 'nowrap',
+  },
+  modelSortButton: {
+    background: '#fff',
+    color: COLORS.slate,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 999,
+    padding: '9px 12px',
+    fontSize: 12,
+    fontWeight: 900,
+    cursor: 'pointer',
+  },
+  modelSortButtonActive: {
+    background: '#ffffff',
+    color: COLORS.blue,
+    border: `1px solid ${COLORS.blue}`,
+    borderRadius: 999,
+    padding: '9px 12px',
+    fontSize: 12,
+    fontWeight: 900,
+    cursor: 'pointer',
+    boxShadow: 'inset 0 0 0 1px rgba(31, 125, 232, 0.12)',
+  },
   modelListWrap: {
     display: 'grid',
     gap: 10,
@@ -3419,18 +3524,19 @@ const styles = {
     gridTemplateColumns: '34px minmax(260px, 1fr) auto',
     gap: 14,
     alignItems: 'center',
-    background: '#f8fbff',
-    border: `1px solid ${COLORS.line}`,
+    background: 'linear-gradient(180deg, #ffffff 0%, #f7fbff 100%)',
+    border: `1px solid ${COLORS.border}`,
     borderRadius: 16,
     padding: '12px 12px',
+    boxShadow: '0 8px 22px rgba(31, 125, 232, 0.07)',
   },
   modelRank: {
-    width: 24,
-    height: 24,
+    width: 28,
+    height: 28,
     borderRadius: 999,
-    background: '#fff',
-    border: `1px solid ${COLORS.border}`,
-    color: COLORS.slate,
+    background: 'linear-gradient(135deg, #58b9ff 0%, #0b74e8 100%)',
+    border: '2px solid #ffffff',
+    color: '#ffffff',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -3455,15 +3561,16 @@ const styles = {
     marginBottom: 8,
   },
   modelBarTrack: {
-    height: 7,
+    height: 8,
     borderRadius: 999,
-    background: '#edf2f7',
+    background: '#e8f2fc',
     overflow: 'hidden',
   },
   modelBarFill: {
     height: '100%',
     borderRadius: 999,
-    background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})`,
+    background: 'linear-gradient(90deg, #52b6ff 0%, #0b74e8 55%, #235fe8 100%)',
+    boxShadow: '0 0 12px rgba(31, 125, 232, 0.28)',
   },
   modelMetricGrid2: {
     display: 'grid',
@@ -3476,7 +3583,7 @@ const styles = {
     gap: 8,
   },
   modelMetricBox: {
-    background: '#fff',
+    background: 'linear-gradient(180deg, #ffffff 0%, #f4f9ff 100%)',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 10,
     padding: '9px 8px',
@@ -3487,10 +3594,11 @@ const styles = {
   },
   modelMetricLabel: {
     color: COLORS.slate,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: 900,
     marginBottom: 5,
-    whiteSpace: 'nowrap',
+    lineHeight: 1.15,
+    textAlign: 'center',
   },
   modelMetricValue: {
     color: COLORS.text,

@@ -2424,21 +2424,6 @@ export default function Dashboard() {
               </div>
 
               <div style={styles.panel}>
-                <div style={styles.sectionTitle}>부품 사용 요약</div>
-                {partUsageSummary.length === 0 ? (
-                  <div style={{ color: COLORS.sub }}>선택한 기간의 부품 교체 내역이 없습니다.</div>
-                ) : (
-                  <div style={styles.partSummaryGrid}>
-                    {partUsageSummary.map(([part, count]) => (
-                      <div key={part} style={styles.summaryBox}>
-                        {part} <strong>{count.toLocaleString()}건</strong>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div style={styles.panel}>
                 <div style={styles.sectionTitleRow}>
                   <div style={styles.sectionTitleNoMargin}>부품 교체 내역</div>
                   <button style={styles.secondaryButton} onClick={downloadVocPartsExcel}>
@@ -3250,7 +3235,11 @@ const styles = {
   dateFilterRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
   dateFilterRow3: { display: 'grid', gridTemplateColumns: '1fr 1fr 1.2fr', gap: 12 },
   partSummaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 },
-  partCompareGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 },
+  partCompareGrid: { 
+  display: 'grid', 
+  gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', 
+  gap: 8 
+},
   partCompareCard: {
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,

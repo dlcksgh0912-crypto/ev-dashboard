@@ -419,6 +419,20 @@ function formatDate(date) {
   return `${y}-${m}-${d} ${hh}:${mm}`;
 }
 
+function formatShortDate(date) {
+  if (!date || Number.isNaN(date.getTime?.())) return '-';
+  const y = String(date.getFullYear()).slice(-2);
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function compactModelLabel(value) {
+  const text = normalizeText(value);
+  if (!text || text === '-') return '-';
+  return text.replace(/^에버온_/, '').replace(/_/g, ' ');
+}
+
 
 function shortAddress(value) {
   const text = normalizeText(value);
@@ -1523,29 +1537,88 @@ export default function Dashboard() {
     };
 
     const modelCounts = countBy(rows, (row) => row.chargerType || getChargerType(row.modelName));
+
+    const installedModelMap = new Map();
+    const installedSiteMap = new Map();
+    const faultSiteMap = new Map();
+
+    mergedRows.forEach((row) => {
+      const modelKey = row.chargerType || getChargerType(row.modelName) || '기타';
+      const siteKey = row.siteId || row.siteName || '충전소ID 미기재';
+
+      installedModelMap.set(modelKey, (installedModelMap.get(modelKey) || 0) + 1);
+      installedSiteMap.set(siteKey, (installedSiteMap.get(siteKey) || 0) + 1);
+
+      if (row.isFault) {
+        faultSiteMap.set(siteKey, (faultSiteMap.get(siteKey) || 0) + 1);
+      }
+    });
+
     const siteMap = new Map();
 
     rows.forEach((row) => {
-      const siteKey = row.siteId || '충전소ID 미기재';
+      const siteKey = row.siteId || row.siteName || '충전소ID 미기재';
       if (!siteMap.has(siteKey)) {
         siteMap.set(siteKey, {
+          siteKey,
           siteId: row.siteId || '-',
           siteName: row.siteName || '-',
           address: shortAddress(row.address),
           chargerCount: 0,
+          installedTotal: installedSiteMap.get(siteKey) || 0,
+          faultTotal: faultSiteMap.get(siteKey) || 0,
+          latestCollectedAt: null,
+          latestCollectedAtText: '-',
+          modelMap: new Map(),
         });
       }
-      siteMap.get(siteKey).chargerCount += 1;
+      const siteItem = siteMap.get(siteKey);
+      const modelKey = row.chargerType || getChargerType(row.modelName) || '기타';
+      siteItem.chargerCount += 1;
+      siteItem.modelMap.set(modelKey, (siteItem.modelMap.get(modelKey) || 0) + 1);
+      if (row.collectedAt && (!siteItem.latestCollectedAt || row.collectedAt > siteItem.latestCollectedAt)) {
+        siteItem.latestCollectedAt = row.collectedAt;
+        siteItem.latestCollectedAtText = formatShortDate(row.collectedAt);
+      }
     });
 
     const siteRows = Array.from(siteMap.values())
-      .sort((a, b) => b.chargerCount - a.chargerCount || String(a.siteName).localeCompare(String(b.siteName)));
+      .map((site) => {
+        const modelEntries = Array.from(site.modelMap.entries())
+          .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+        const topModel = modelEntries[0]?.[0] || '-';
+        const extraModelCount = Math.max(modelEntries.length - 1, 0);
+        return {
+          ...site,
+          mainModel: extraModelCount > 0 ? `${compactModelLabel(topModel)} 외 ${extraModelCount}` : compactModelLabel(topModel),
+          installedRate: site.installedTotal > 0 ? Math.round((site.chargerCount / site.installedTotal) * 1000) / 10 : 0,
+          faultRate: site.faultTotal > 0 ? Math.round((site.chargerCount / site.faultTotal) * 1000) / 10 : 0,
+        };
+      })
+      .sort((a, b) => b.installedTotal - a.installedTotal || b.chargerCount - a.chargerCount || String(a.siteName).localeCompare(String(b.siteName)));
 
-    const installedModelMap = new Map();
-    mergedRows.forEach((row) => {
-      const key = row.chargerType || getChargerType(row.modelName) || '기타';
-      installedModelMap.set(key, (installedModelMap.get(key) || 0) + 1);
+    const regionMap = new Map();
+    siteRows.forEach((site) => {
+      const regionKey = site.address || '지역 미기재';
+      if (!regionMap.has(regionKey)) {
+        regionMap.set(regionKey, {
+          region: regionKey,
+          chargerCount: 0,
+          siteCount: 0,
+          shareRate: 0,
+        });
+      }
+      const regionItem = regionMap.get(regionKey);
+      regionItem.chargerCount += site.chargerCount || 0;
+      regionItem.siteCount += 1;
     });
+
+    const regionRows = Array.from(regionMap.values())
+      .map((region) => ({
+        ...region,
+        shareRate: rows.length > 0 ? Math.round((region.chargerCount / rows.length) * 1000) / 10 : 0,
+      }))
+      .sort((a, b) => b.chargerCount - a.chargerCount || b.siteCount - a.siteCount || String(a.region).localeCompare(String(b.region)));
 
     const faultTotalCount = mergedRows.filter((row) => row.isFault).length;
 
@@ -1557,6 +1630,7 @@ export default function Dashboard() {
       uniqueSiteCount: siteRows.length,
       modelCounts,
       siteRows,
+      regionRows,
       installedModelMap,
       faultTotalCount,
       goFilter: goFilterMap[summaryModalType] || 'all',
@@ -2575,22 +2649,21 @@ export default function Dashboard() {
 
 function SummaryModal({ data, onClose, onGoDetails }) {
   const isNormal = data.type === 'normal';
-  const isManualOff = data.type === 'manualOff';
   const isFaultLike = ['fault', 'vocPending', 'uninbound', 'replacement', 'manualOff'].includes(data.type);
+  const isManualOffSummary = data.type === 'manualOff';
+  const [analysisView, setAnalysisView] = useState('model');
   const [modelSortType, setModelSortType] = useState('faultRate');
+  const [regionSortType, setRegionSortType] = useState('count');
+  const [siteSortType, setSiteSortType] = useState('targetCount');
 
   const modelRows = data.modelCounts || [];
-  const maxCount = Math.max(...modelRows.map((item) => item.count || 0), 1);
-
-  const headerBadge = isNormal
-    ? '수량 / 비중'
-    : '수량 / 동일 기종 설치 대비 / 고장대비';
-  const description = isNormal
-    ? '정상 운영 충전기의 모델별 구성 비중을 확인합니다.'
-    : '모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.';
+  const regionRows = data.regionRows || [];
+  const siteRows = data.siteRows || [];
+  const maxModelCount = Math.max(...modelRows.map((item) => item.count || 0), 1);
+  const maxRegionCount = Math.max(...regionRows.map((item) => item.chargerCount || 0), 1);
+  const maxSiteCount = Math.max(...siteRows.map((item) => item.chargerCount || 0), 1);
 
   const getInstalledTotal = (modelName) => data.installedModelMap?.get?.(modelName) || 0;
-  const getFaultTotal = () => data.faultTotalCount || data.totalCount || 0;
 
   const sortedModelRows = useMemo(() => {
     const withMetrics = modelRows.map((item, index) => {
@@ -2618,17 +2691,77 @@ function SummaryModal({ data, onClose, onGoDetails }) {
         return diff !== 0 ? diff : (b.count || 0) - (a.count || 0);
       }
 
+      if (modelSortType === 'count') {
+        return (b.count || 0) - (a.count || 0) || String(a.name).localeCompare(String(b.name));
+      }
+
       const diff = (b._faultRate || 0) - (a._faultRate || 0);
       return diff !== 0 ? diff : (b.count || 0) - (a.count || 0);
     });
   }, [modelRows, data.totalCount, data.installedModelMap, modelSortType, isNormal]);
+
+  const sortedRegionRows = useMemo(() => {
+    const withMetrics = regionRows.map((item, index) => ({
+      ...item,
+      _originalIndex: index,
+    }));
+
+    return withMetrics.sort((a, b) => {
+      if (regionSortType === 'siteCount') {
+        return (b.siteCount || 0) - (a.siteCount || 0) || (b.chargerCount || 0) - (a.chargerCount || 0);
+      }
+
+      if (regionSortType === 'shareRate') {
+        return (b.shareRate || 0) - (a.shareRate || 0) || (b.chargerCount || 0) - (a.chargerCount || 0);
+      }
+
+      return (b.chargerCount || 0) - (a.chargerCount || 0) || (b.siteCount || 0) - (a.siteCount || 0);
+    });
+  }, [regionRows, regionSortType]);
+
+  const sortedSiteRows = useMemo(() => {
+    const withMetrics = siteRows.map((item, index) => ({
+      ...item,
+      _originalIndex: index,
+      _latestCollectedTime: item.latestCollectedAt instanceof Date && !Number.isNaN(item.latestCollectedAt.getTime())
+        ? item.latestCollectedAt.getTime()
+        : 0,
+    }));
+
+    return withMetrics.sort((a, b) => {
+      if (siteSortType === 'latestCollectedOld') {
+        return (a._latestCollectedTime || 0) - (b._latestCollectedTime || 0) || (b.chargerCount || 0) - (a.chargerCount || 0);
+      }
+
+      if (siteSortType === 'latestCollectedNew') {
+        return (b._latestCollectedTime || 0) - (a._latestCollectedTime || 0) || (b.chargerCount || 0) - (a.chargerCount || 0);
+      }
+
+      return (b.chargerCount || 0) - (a.chargerCount || 0) || String(a.siteName).localeCompare(String(b.siteName));
+    });
+  }, [siteRows, siteSortType]);
+
+  const isRegionView = isManualOffSummary && analysisView === 'region';
+  const isSiteView = isManualOffSummary && analysisView === 'site';
+  const headerBadge = isRegionView
+    ? '지역 / 수량 / 충전소 / 비중'
+    : (isSiteView
+      ? '모델 / 수량 / 마지막 수집'
+      : (isNormal ? '수량 / 비중' : '수량 / 동일 기종 설치 대비 / 고장대비'));
+  const description = isRegionView
+    ? '지역별 임의 OFF 분포와 집중도를 먼저 확인합니다.'
+    : (isSiteView
+      ? '충전소별 대상 수량과 마지막 수집일을 확인합니다.'
+      : (isNormal
+        ? '정상 운영 충전기의 모델별 구성 비중을 확인합니다.'
+        : '모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.'));
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
       <div style={styles.modelModalBox} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <div>
-            <div style={styles.modalEyebrow}>MODEL SUMMARY</div>
+            <div style={styles.modalEyebrow}>{isRegionView ? 'REGION SUMMARY' : (isSiteView ? 'SITE SUMMARY' : 'MODEL SUMMARY')}</div>
             <div style={styles.modalTitle}>{data.title} 요약</div>
             <div style={styles.modalSubText}>{description}</div>
           </div>
@@ -2653,104 +2786,271 @@ function SummaryModal({ data, onClose, onGoDetails }) {
         <div style={styles.modelAnalysisBox}>
           <div style={styles.modelAnalysisHeader}>
             <div>
-              <div style={styles.modelAnalysisTitle}>모델별 분석</div>
+              {isManualOffSummary && (
+                <div style={styles.analysisTabRow}>
+                  <button
+                    type="button"
+                    style={analysisView === 'model' ? styles.analysisTabActive : styles.analysisTab}
+                    onClick={() => setAnalysisView('model')}
+                  >
+                    모델별
+                  </button>
+                  <button
+                    type="button"
+                    style={analysisView === 'region' ? styles.analysisTabActive : styles.analysisTab}
+                    onClick={() => setAnalysisView('region')}
+                  >
+                    지역별
+                  </button>
+                  <button
+                    type="button"
+                    style={analysisView === 'site' ? styles.analysisTabActive : styles.analysisTab}
+                    onClick={() => setAnalysisView('site')}
+                  >
+                    충전소별
+                  </button>
+                </div>
+              )}
+              <div style={styles.modelAnalysisTitle}>{isRegionView ? '지역별 분석' : (isSiteView ? '충전소별 분석' : '모델별 분석')}</div>
               <div style={styles.modelAnalysisDesc}>
-                {isNormal
-                  ? '모델별 수량과 정상 운영 전체 대비 비중입니다.'
-                  : '설치대비는 해당 모델 전체 설치 수량 대비 현재 카드 대상 수량 비율입니다.'}
+                {isRegionView
+                  ? '임의 OFF가 집중된 지역을 표와 막대 그래프로 먼저 확인합니다.'
+                  : (isSiteView
+                    ? '대상 수량이 많은 충전소와 마지막 수집일을 간단히 확인합니다.'
+                    : (isNormal
+                      ? '모델별 수량과 정상 운영 전체 대비 비중입니다.'
+                      : '설치대비는 해당 모델 전체 설치 수량 대비 현재 카드 대상 수량 비율입니다.'))}
               </div>
             </div>
             <div style={styles.modelAnalysisHeaderRight}>
-              {!isNormal && (
+              {isRegionView ? (
                 <div style={styles.modelSortButtonRow}>
                   <span style={styles.modelSortLabel}>정렬기준</span>
                   <button
                     type="button"
-                    style={modelSortType === 'installedRate' ? styles.modelSortButtonActive : styles.modelSortButton}
-                    onClick={() => setModelSortType('installedRate')}
+                    style={regionSortType === 'count' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setRegionSortType('count')}
                   >
-                    동일 기종 설치 대비
+                    수량순
                   </button>
                   <button
                     type="button"
-                    style={modelSortType === 'faultRate' ? styles.modelSortButtonActive : styles.modelSortButton}
-                    onClick={() => setModelSortType('faultRate')}
+                    style={regionSortType === 'siteCount' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setRegionSortType('siteCount')}
                   >
-                    고장대비
+                    충전소순
+                  </button>
+                  <button
+                    type="button"
+                    style={regionSortType === 'shareRate' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setRegionSortType('shareRate')}
+                  >
+                    비중순
                   </button>
                 </div>
+              ) : isSiteView ? (
+                <div style={styles.modelSortButtonRow}>
+                  <span style={styles.modelSortLabel}>정렬기준</span>
+                  <button
+                    type="button"
+                    style={siteSortType === 'targetCount' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setSiteSortType('targetCount')}
+                  >
+                    수량순
+                  </button>
+                  <button
+                    type="button"
+                    style={siteSortType === 'latestCollectedOld' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setSiteSortType('latestCollectedOld')}
+                  >
+                    미수집 오래된순
+                  </button>
+                  <button
+                    type="button"
+                    style={siteSortType === 'latestCollectedNew' ? styles.modelSortButtonActive : styles.modelSortButton}
+                    onClick={() => setSiteSortType('latestCollectedNew')}
+                  >
+                    최근 수집순
+                  </button>
+                </div>
+              ) : (
+                !isNormal && (
+                  <div style={styles.modelSortButtonRow}>
+                    <span style={styles.modelSortLabel}>정렬기준</span>
+                    <button
+                      type="button"
+                      style={modelSortType === 'count' ? styles.modelSortButtonActive : styles.modelSortButton}
+                      onClick={() => setModelSortType('count')}
+                    >
+                      수량순
+                    </button>
+                    <button
+                      type="button"
+                      style={modelSortType === 'installedRate' ? styles.modelSortButtonActive : styles.modelSortButton}
+                      onClick={() => setModelSortType('installedRate')}
+                    >
+                      동일 기종 설치 대비
+                    </button>
+                    <button
+                      type="button"
+                      style={modelSortType === 'faultRate' ? styles.modelSortButtonActive : styles.modelSortButton}
+                      onClick={() => setModelSortType('faultRate')}
+                    >
+                      고장대비
+                    </button>
+                  </div>
+                )
               )}
               <div style={styles.modelAnalysisBadge}>{headerBadge}</div>
             </div>
           </div>
 
           <div style={styles.modelListWrap}>
-            {modelRows.length === 0 ? (
-              <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
-            ) : (
-              sortedModelRows.map((item, idx) => {
-                const count = item.count || 0;
-                const installedTotal = item._installedTotal ?? getInstalledTotal(item.name);
-                const normalPercent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
-                const installedRate = item._installedRate ?? (installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0);
-                const faultRate = item._faultRate ?? (data.totalCount > 0
-                  ? Math.round((count / data.totalCount) * 1000) / 10
-                  : 0);
-                const barPercent = Math.min((count / maxCount) * 100, 100);
+            {isRegionView ? (
+              regionRows.length === 0 ? (
+                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+              ) : (
+                sortedRegionRows.map((item, idx) => {
+                  const count = item.chargerCount || 0;
+                  const siteCount = item.siteCount || 0;
+                  const shareRate = item.shareRate || 0;
+                  const barPercent = Math.min((count / maxRegionCount) * 100, 100);
 
-                return (
-                  <div key={`${item.name}-${idx}`} style={styles.modelRowCard}>
-                    <div style={styles.modelRank}>{idx + 1}</div>
+                  return (
+                    <div key={`${item.region}-${idx}`} style={styles.regionRowCard}>
+                      <div style={styles.modelRank}>{idx + 1}</div>
 
-                    <div style={styles.modelNameBlock}>
-                      <div style={styles.modelName}>{item.name || '기타'}</div>
-                      <div style={styles.modelSub}>
-                        {isNormal
-                          ? `정상 운영 ${count.toLocaleString()}기 기준`
-                          : `설치 ${installedTotal.toLocaleString()}기 기준`}
-                      </div>
-                      <div style={styles.modelBarTrack}>
-                        <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
-                      </div>
-                    </div>
-
-                    <div style={isNormal ? styles.modelMetricGrid2 : styles.modelMetricGrid3}>
-                      <div style={styles.modelMetricBox}>
-                        <div style={styles.modelMetricLabel}>수량</div>
-                        <div style={styles.modelMetricValue}>{count.toLocaleString()}기</div>
+                      <div style={styles.modelNameBlock}>
+                        <div style={styles.modelName}>{item.region || '지역 미기재'}</div>
+                        <div style={styles.modelSub}>임의 OFF {count.toLocaleString()}기 · {siteCount.toLocaleString()}개소</div>
+                        <div style={styles.modelBarTrack}>
+                          <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
+                        </div>
                       </div>
 
-                      {isNormal ? (
+                      <div style={styles.modelMetricGrid3}>
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>수량</div>
+                          <div style={styles.modelMetricValue}>{count.toLocaleString()}기</div>
+                        </div>
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>충전소</div>
+                          <div style={styles.modelMetricValue}>{siteCount.toLocaleString()}개소</div>
+                        </div>
                         <div style={styles.modelMetricBox}>
                           <div style={styles.modelMetricLabel}>비중</div>
-                          <div style={styles.modelMetricValue}>{normalPercent}%</div>
+                          <div style={styles.modelMetricValue}>{shareRate}%</div>
                         </div>
-                      ) : (
-                        <>
-                          <div style={styles.modelMetricBox}>
-                            <div style={styles.modelMetricLabel}>
-                              동일 기종
-                              <br />
-                              설치 대비
-                            </div>
-                            <div style={styles.modelMetricValue}>{installedRate}%</div>
-                          </div>
-                          <div style={styles.modelMetricBox}>
-                            <div style={styles.modelMetricLabel}>고장대비</div>
-                            <div style={styles.modelMetricValue}>{faultRate}%</div>
-                          </div>
-                        </>
-                      )}
+                      </div>
                     </div>
-                  </div>
-                );
-              })
+                  );
+                })
+              )
+            ) : isSiteView ? (
+              siteRows.length === 0 ? (
+                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+              ) : (
+                sortedSiteRows.map((item, idx) => {
+                  const count = item.chargerCount || 0;
+                  const latestCollectedText = item.latestCollectedAtText || '-';
+                  const barPercent = Math.min((count / maxSiteCount) * 72, 72);
+
+                  return (
+                    <div key={`${item.siteKey || item.siteId || item.siteName}-${idx}`} style={styles.siteRowCard}>
+                      <div style={styles.modelRank}>{idx + 1}</div>
+
+                      <div style={styles.modelNameBlock}>
+                        <div style={styles.modelName}>{item.siteName || '충전소명 미기재'}</div>
+                        <div style={styles.modelSub}>
+                          사이트 ID {item.siteId || '-'}{item.address && item.address !== '-' ? ` · ${item.address}` : ''}
+                        </div>
+                        <div style={styles.siteBarTrack}>
+                          <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
+                        </div>
+                      </div>
+
+                      <div style={styles.siteCompactGrid}>
+                        <div style={styles.siteCompactHead}>모델</div>
+                        <div style={styles.siteCompactHead}>수량</div>
+                        <div style={styles.siteCompactHead}>마지막 수집</div>
+                        <div style={styles.siteCompactValue}>{item.mainModel || '-'}</div>
+                        <div style={styles.siteCompactValue}>{count.toLocaleString()}기</div>
+                        <div style={styles.siteCompactValue}>{latestCollectedText}</div>
+                      </div>
+                    </div>
+                  );
+                })
+              )
+            ) : (
+              modelRows.length === 0 ? (
+                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+              ) : (
+                sortedModelRows.map((item, idx) => {
+                  const count = item.count || 0;
+                  const installedTotal = item._installedTotal ?? getInstalledTotal(item.name);
+                  const normalPercent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
+                  const installedRate = item._installedRate ?? (installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0);
+                  const faultRate = item._faultRate ?? (data.totalCount > 0
+                    ? Math.round((count / data.totalCount) * 1000) / 10
+                    : 0);
+                  const barPercent = Math.min((count / maxModelCount) * 100, 100);
+
+                  return (
+                    <div key={`${item.name}-${idx}`} style={styles.modelRowCard}>
+                      <div style={styles.modelRank}>{idx + 1}</div>
+
+                      <div style={styles.modelNameBlock}>
+                        <div style={styles.modelName}>{item.name || '기타'}</div>
+                        <div style={styles.modelSub}>
+                          {isNormal
+                            ? `정상 운영 ${count.toLocaleString()}기 기준`
+                            : `설치 ${installedTotal.toLocaleString()}기 기준`}
+                        </div>
+                        <div style={styles.modelBarTrack}>
+                          <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
+                        </div>
+                      </div>
+
+                      <div style={isNormal ? styles.modelMetricGrid2 : styles.modelMetricGrid3}>
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>수량</div>
+                          <div style={styles.modelMetricValue}>{count.toLocaleString()}기</div>
+                        </div>
+
+                        {isNormal ? (
+                          <div style={styles.modelMetricBox}>
+                            <div style={styles.modelMetricLabel}>비중</div>
+                            <div style={styles.modelMetricValue}>{normalPercent}%</div>
+                          </div>
+                        ) : (
+                          <>
+                            <div style={styles.modelMetricBox}>
+                              <div style={styles.modelMetricLabel}>
+                                동일 기종
+                                <br />
+                                설치 대비
+                              </div>
+                              <div style={styles.modelMetricValue}>{installedRate}%</div>
+                            </div>
+                            <div style={styles.modelMetricBox}>
+                              <div style={styles.modelMetricLabel}>고장대비</div>
+                              <div style={styles.modelMetricValue}>{faultRate}%</div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )
             )}
           </div>
 
-          {isFaultLike && (
+          {isManualOffSummary && (isRegionView || isSiteView) && (
             <div style={styles.modelFootnote}>
-              ※ 수량은 해당 카드에 포함된 충전기 수량이며, 설치대비는 모델별 전체 설치 수량 대비 비율입니다.
+              {isRegionView
+                ? '※ 지역별 분석의 비중은 전체 임의 OFF 수량 대비 해당 지역 수량 비율입니다.'
+                : '※ 충전소별 분석의 수량은 임의 OFF 수량이며, 마지막 수집은 해당 충전소 대상 충전기 중 가장 최근 수집일입니다.'}
             </div>
           )}
         </div>
@@ -3442,6 +3742,37 @@ const styles = {
     gap: 14,
     marginBottom: 16,
   },
+  analysisTabRow: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    background: '#eef5ff',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 999,
+    padding: 4,
+    marginBottom: 12,
+  },
+  analysisTab: {
+    background: 'transparent',
+    color: COLORS.slate,
+    border: 'none',
+    borderRadius: 999,
+    padding: '8px 13px',
+    fontSize: 13,
+    fontWeight: 900,
+    cursor: 'pointer',
+  },
+  analysisTabActive: {
+    background: '#ffffff',
+    color: COLORS.blue,
+    border: `1px solid ${COLORS.blue}33`,
+    borderRadius: 999,
+    padding: '8px 13px',
+    fontSize: 13,
+    fontWeight: 900,
+    cursor: 'pointer',
+    boxShadow: '0 5px 14px rgba(29, 99, 233, 0.12)',
+  },
   modelAnalysisTitle: {
     fontSize: 17,
     fontWeight: 900,
@@ -3519,6 +3850,28 @@ const styles = {
     padding: '12px 12px',
     boxShadow: '0 8px 22px rgba(31, 125, 232, 0.07)',
   },
+  regionRowCard: {
+    display: 'grid',
+    gridTemplateColumns: '34px minmax(260px, 1fr) auto',
+    gap: 14,
+    alignItems: 'center',
+    background: 'linear-gradient(180deg, #ffffff 0%, #f7fbff 100%)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 16,
+    padding: '12px 12px',
+    boxShadow: '0 8px 22px rgba(31, 125, 232, 0.07)',
+  },
+  siteRowCard: {
+    display: 'grid',
+    gridTemplateColumns: '34px minmax(260px, 1fr) 300px',
+    gap: 14,
+    alignItems: 'center',
+    background: 'linear-gradient(180deg, #ffffff 0%, #f7fbff 100%)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 16,
+    padding: '12px 12px',
+    boxShadow: '0 8px 22px rgba(31, 125, 232, 0.07)',
+  },
   modelRank: {
     width: 28,
     height: 28,
@@ -3555,11 +3908,46 @@ const styles = {
     background: '#e8f2fc',
     overflow: 'hidden',
   },
+  siteBarTrack: {
+    width: '72%',
+    maxWidth: 440,
+    height: 8,
+    borderRadius: 999,
+    background: '#e8f2fc',
+    overflow: 'hidden',
+  },
   modelBarFill: {
     height: '100%',
     borderRadius: 999,
     background: 'linear-gradient(90deg, #52b6ff 0%, #0b74e8 55%, #235fe8 100%)',
     boxShadow: '0 0 12px rgba(31, 125, 232, 0.28)',
+  },
+  siteCompactGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1.25fr 0.7fr 1fr',
+    gap: '6px 8px',
+    alignItems: 'center',
+    background: 'linear-gradient(180deg, #ffffff 0%, #f4f9ff 100%)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 12,
+    padding: '9px 10px',
+    minWidth: 0,
+  },
+  siteCompactHead: {
+    color: COLORS.slate,
+    fontSize: 11,
+    fontWeight: 900,
+    textAlign: 'center',
+    whiteSpace: 'nowrap',
+  },
+  siteCompactValue: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: 900,
+    textAlign: 'center',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
   modelMetricGrid2: {
     display: 'grid',
@@ -3569,6 +3957,11 @@ const styles = {
   modelMetricGrid3: {
     display: 'grid',
     gridTemplateColumns: 'repeat(3, 104px)',
+    gap: 8,
+  },
+  modelMetricGrid4: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(4, 92px)',
     gap: 8,
   },
   modelMetricBox: {

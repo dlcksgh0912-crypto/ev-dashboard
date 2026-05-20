@@ -221,6 +221,33 @@ function getChargerType(modelName) {
   return partialKey ? MODEL_TYPE_MAP[partialKey] : '기타';
 }
 
+function isFastChargerType(chargerType) {
+  return /_급속$/.test(normalizeText(chargerType));
+}
+
+function getChargerSpeedGroup(row) {
+  const type = row?.chargerType || getChargerType(row?.modelName);
+  return isFastChargerType(type) ? 'fast' : 'slow';
+}
+
+function getChargerSpeedLabel(speed) {
+  if (speed === 'all') return '전체';
+  return speed === 'fast' ? '급속' : '완속';
+}
+
+function getManufacturerGroupFromType(chargerType) {
+  const type = normalizeText(chargerType);
+  if (!type || type === '-') return '기타';
+
+  const maker = type.split('_')[0]?.trim();
+  return maker || '기타';
+}
+
+function getManufacturerGroup(row) {
+  const type = row?.chargerType || getChargerType(row?.modelName);
+  return getManufacturerGroupFromType(type);
+}
+
 function isValidChargerReplacement(text) {
   const normalized = normalizeText(text);
   const hasChargerReplace = /충전기\s?교체/i.test(normalized);
@@ -419,6 +446,24 @@ function formatDate(date) {
   return `${y}-${m}-${d} ${hh}:${mm}`;
 }
 
+function formatDateInputValue(date) {
+  if (!date || Number.isNaN(date.getTime?.())) return '';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getRecentWeekDateRange() {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(end.getDate() - 6);
+  return {
+    start: formatDateInputValue(start),
+    end: formatDateInputValue(end),
+  };
+}
+
 function formatShortDate(date) {
   if (!date || Number.isNaN(date.getTime?.())) return '-';
   const y = String(date.getFullYear()).slice(-2);
@@ -438,6 +483,48 @@ function shortAddress(value) {
   const text = normalizeText(value);
   if (!text) return '-';
   return text.slice(0, 2);
+}
+
+function getSidoName(value) {
+  const text = normalizeText(value);
+  if (!text || text === '-') return '지역 미기재';
+
+  const compact = text.replace(/\s+/g, '');
+  const rules = [
+    [/서울/, '서울'],
+    [/경기/, '경기'],
+    [/인천/, '인천'],
+    [/대전/, '대전'],
+    [/세종/, '세종'],
+    [/충청북도|충북/, '충북'],
+    [/충청남도|충남/, '충남'],
+    [/부산/, '부산'],
+    [/대구/, '대구'],
+    [/울산/, '울산'],
+    [/경상북도|경북/, '경북'],
+    [/경상남도|경남/, '경남'],
+    [/광주/, '광주'],
+    [/전북특별자치도|전라북도|전북/, '전북'],
+    [/전라남도|전남/, '전남'],
+    [/강원특별자치도|강원도|강원/, '강원'],
+    [/제주특별자치도|제주도|제주/, '제주'],
+  ];
+
+  const found = rules.find(([regex]) => regex.test(compact));
+  if (found) return found[1];
+
+  return text.slice(0, 2) || '지역 미기재';
+}
+
+function getRegionGroup(value) {
+  const sido = getSidoName(value);
+  if (['서울', '경기', '인천'].includes(sido)) return '수도권';
+  if (['대전', '세종', '충북', '충남'].includes(sido)) return '충청권';
+  if (['부산', '대구', '울산', '경북', '경남'].includes(sido)) return '경상권';
+  if (['광주', '전북', '전남'].includes(sido)) return '전라권';
+  if (sido === '강원') return '강원권';
+  if (sido === '제주') return '제주권';
+  return '지역 미기재';
 }
 
 function extractPartNamesFromContent(value) {
@@ -590,6 +677,7 @@ function parseRawFile(file, rows) {
         isApprovalPending,
         isNormalOperation,
         isFault,
+        isStopped,
         isFaultByCollected,
         isManualOff,
         isManualOffFault,
@@ -847,7 +935,20 @@ function classifyRows(rawRows, replacementSet, vocRows, faultCutoff) {
       return type.startsWith('알박') || type.startsWith('이카플러그');
     });
 
-    if (isAllFault && isAllUninbound && isTargetMaker) {
+    // 추가 승인대기 기준:
+    // 같은 충전소의 전체 충전기가 모두 수집중단 상태이고,
+    // 각 충전기의 누적사용량이 각각 100 이하이면 승인대기로 분류합니다.
+    // 단, 임의 OFF / 과다이상은 기존 우선순위 보호를 위해 제외합니다.
+    const isAllStoppedAndEachLowUsage = siteRows.every((row) => (
+      row.isStopped &&
+      row.usageCount !== null &&
+      row.usageCount !== undefined &&
+      row.usageCount <= 100 &&
+      !row.isManualOff &&
+      !row.isOverAbnormal
+    ));
+
+    if ((isAllFault && isAllUninbound && isTargetMaker) || isAllStoppedAndEachLowUsage) {
       approvalOverrideSiteSet.add(siteKey);
     }
   });
@@ -997,6 +1098,7 @@ function statusMeta(type) {
     case '미인입 고장':
       return { accent: COLORS.lightGray, soft: COLORS.lightGraySoft, icon: 'uninbound' };
     case '교체 예정':
+    case '교체 진행중':
       return { accent: COLORS.orange, soft: COLORS.orangeSoft, icon: 'replacement' };
     case '임의 OFF':
       return { accent: COLORS.darkGray, soft: COLORS.darkGraySoft, icon: 'off' };
@@ -1011,13 +1113,40 @@ function StatusDot({ row }) {
   return <span style={{ ...styles.statusNowrap, color: COLORS.blue }}>● 정상 운영</span>;
 }
 
+function displayFaultTypeName(type) {
+  if (type === '교체 예정') return '교체 진행중';
+  return type || '고장';
+}
+
+function isActiveFaultRow(row) {
+  return !!row?.isFault;
+}
+
 function SearchStatusTag({ row }) {
-  if (row.isFault) return <span style={styles.tagRed}>● {row.faultType || '고장'}</span>;
+  if (row.isFault) return <span style={styles.tagRed}>● {displayFaultTypeName(row.faultType)}</span>;
   if (row.isApprovalPending) return <span style={styles.tagYellow}>● 승인대기</span>;
   return <span style={styles.tagBlue}>● 정상 운영</span>;
 }
 
-function StatCard({ title, value, sub, onClick }) {
+function getCardGradient(title) {
+  switch (title) {
+    case '고장 충전기':
+      return 'linear-gradient(135deg, #ffffff 0%, #faf5ff 54%, #f3e8ff 100%)';
+    case 'VOC 조치 예정':
+      return 'linear-gradient(135deg, #ffffff 0%, #fff1f2 56%, #fee2e2 100%)';
+    case '미인입 고장':
+      return 'linear-gradient(135deg, #ffffff 0%, #f8fafc 56%, #e5e7eb 100%)';
+    case '임의 OFF':
+      return 'linear-gradient(135deg, #ffffff 0%, #f3f4f6 54%, #d1d5db 100%)';
+    case '교체 진행중':
+    case '교체 예정':
+      return 'linear-gradient(135deg, #ffffff 0%, #fff7ed 54%, #fed7aa 100%)';
+    default:
+      return COLORS.panel;
+  }
+}
+
+function StatCard({ title, value, sub, onClick, compact = false }) {
   const meta = statusMeta(title);
   return (
     <div
@@ -1029,6 +1158,8 @@ function StatCard({ title, value, sub, onClick }) {
       }}
       style={{
         ...styles.card,
+        ...(compact ? styles.compactCard : {}),
+        background: getCardGradient(title),
         border: `1px solid ${meta.accent}55`,
         boxShadow: COLORS.shadow,
         cursor: onClick ? 'pointer' : 'default',
@@ -1043,6 +1174,110 @@ function StatCard({ title, value, sub, onClick }) {
       <div style={styles.cardValue}>{value}</div>
       <div style={styles.cardSub}>{sub}</div>
       <div style={{ ...styles.cardAccent, background: meta.accent }} />
+    </div>
+  );
+}
+
+function HeroStatusCard({ title, value, sub, onClick }) {
+  const meta = statusMeta(title);
+  return (
+    <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === 'Enter' || e.key === ' ')) onClick();
+      }}
+      style={{
+        ...styles.heroStatusCard,
+        border: `1px solid ${meta.accent}55`,
+        cursor: onClick ? 'pointer' : 'default',
+      }}
+    >
+      <div style={styles.heroStatusBody}>
+        <div>
+          <div style={{ ...styles.heroStatusTitle, color: meta.accent }}>{title}</div>
+          <div style={styles.heroStatusValue}>{value}</div>
+          <div style={styles.heroStatusSub}>{sub}</div>
+        </div>
+        <div style={{ ...styles.heroMetricIconWrap, background: meta.soft }}>
+          <MetricIcon type={meta.icon} color={meta.accent} />
+        </div>
+      </div>
+      <div style={{ ...styles.cardAccent, background: meta.accent }} />
+    </div>
+  );
+}
+
+function TopMiniMetric({ title, value, sub, onClick }) {
+  const meta = statusMeta(title);
+  return (
+    <div
+      onClick={onClick}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (onClick && (e.key === 'Enter' || e.key === ' ')) onClick();
+      }}
+      style={{
+        ...styles.topMiniMetric,
+        borderLeft: `4px solid ${meta.accent}`,
+        cursor: onClick ? 'pointer' : 'default',
+      }}
+    >
+      <div style={styles.topMiniTextArea}>
+        <div style={{ ...styles.topMiniTitle, color: meta.accent }}>{title}</div>
+        <div style={styles.topMiniSub}>{sub}</div>
+      </div>
+      <div style={styles.topMiniValue}>{value}</div>
+    </div>
+  );
+}
+
+
+function OperatingOverviewCard({ dashboard, onTotalClick }) {
+  const total = dashboard.total || 0;
+  const approvalRate = total > 0 ? Math.round((dashboard.approvalPending / total) * 1000) / 10 : 0;
+  const normalRate = total > 0 ? Math.round((dashboard.normalOperation / total) * 1000) / 10 : 0;
+
+  return (
+    <div style={styles.operatingOverviewCard}>
+      <div style={styles.operatingOverviewHeader}>
+        <div>
+          <div style={styles.operatingEyebrow}>전체 운영 상태</div>
+        </div>
+      </div>
+
+      <div style={styles.operatingConnectedGrid}>
+        <div
+          style={{ ...styles.operatingSegment, ...styles.operatingSegmentTotal, cursor: 'pointer' }}
+          onClick={onTotalClick}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') onTotalClick();
+          }}
+        >
+          <div style={styles.operatingSegmentIconTopRight}>
+            <MetricIcon type="charger" color={COLORS.blue} />
+          </div>
+          <div style={{ ...styles.operatingSegmentTitle, color: COLORS.blue }}>전체 충전기</div>
+          <div style={styles.operatingSegmentValue}>{dashboard.total.toLocaleString()}기</div>
+        </div>
+
+        <div style={{ ...styles.operatingSegment, ...styles.operatingSegmentApproval }}>
+          <div style={{ ...styles.operatingSegmentTitle, color: COLORS.yellow }}>승인대기</div>
+          <div style={styles.operatingSegmentValue}>{dashboard.approvalPending.toLocaleString()}기</div>
+          <div style={styles.operatingSegmentSub}>전체 대비 {approvalRate}%</div>
+        </div>
+
+        <div style={{ ...styles.operatingSegment, ...styles.operatingSegmentNormal }}>
+          <div style={{ ...styles.operatingSegmentTitle, color: COLORS.green }}>정상 운영</div>
+          <div style={styles.operatingSegmentValue}>{dashboard.normalOperation.toLocaleString()}기</div>
+          <div style={styles.operatingSegmentSub}>전체 대비 {normalRate}%</div>
+        </div>
+      </div>
+
     </div>
   );
 }
@@ -1064,8 +1299,8 @@ function DonutChart({ dashboard }) {
   const data = [
     { name: '임의 OFF', value: dashboard.manualOff, color: COLORS.darkGray },
     { name: 'VOC 조치 예정', value: dashboard.vocPending, color: COLORS.red },
-    { name: '교체 예정', value: dashboard.replacement, color: COLORS.orange },
     { name: '미인입 고장', value: dashboard.uninbound, color: COLORS.lightGray },
+    { name: '교체 진행중', value: dashboard.replacement, color: COLORS.orange },
   ];
 
   if (!total) {
@@ -1099,7 +1334,7 @@ function DonutChart({ dashboard }) {
           </div>
         </div>
       </div>
-      <div style={{ display: 'grid', gap: 10 }}>
+      <div style={styles.donutLegendStack}>
         {data.map((item) => {
           const percent = total > 0 ? Math.round((item.value / total) * 1000) / 10 : 0;
           return (
@@ -1139,12 +1374,13 @@ export default function Dashboard() {
   const [tab, setTab] = useState('dashboard');
   const [searchText, setSearchText] = useState('');
   const [faultFilter, setFaultFilter] = useState('all');
+  const [detailModelFilter, setDetailModelFilter] = useState('all');
   const [recurrenceFilter, setRecurrenceFilter] = useState('all');
   const [longPendingFilter, setLongPendingFilter] = useState('all');
   const [sortFilter, setSortFilter] = useState('default');
   const [orgFilter, setOrgFilter] = useState('EV세상');
-  const [vocPartStartDate, setVocPartStartDate] = useState('');
-  const [vocPartEndDate, setVocPartEndDate] = useState('');
+  const [vocPartStartDate, setVocPartStartDate] = useState(() => getRecentWeekDateRange().start);
+  const [vocPartEndDate, setVocPartEndDate] = useState(() => getRecentWeekDateRange().end);
   const [vocPartCompareMode, setVocPartCompareMode] = useState('samePeriod');
   const [vocPerformanceStartDate, setVocPerformanceStartDate] = useState('');
   const [vocPerformanceEndDate, setVocPerformanceEndDate] = useState('');
@@ -1494,7 +1730,8 @@ export default function Dashboard() {
   }, [mergedRows, vocRows]);
 
   const getRowsForSummaryType = (type) => {
-    if (type === 'fault') return mergedRows.filter((row) => row.isFault);
+    if (type === 'total') return mergedRows;
+    if (type === 'fault') return mergedRows.filter((row) => isActiveFaultRow(row));
     if (type === 'normal') return mergedRows.filter((row) => row.isNormalOperation);
     if (type === 'manualOff') return mergedRows.filter((row) => row.faultType === '임의 OFF');
     if (type === 'vocPending') return mergedRows.filter((row) => row.faultType === 'VOC 조치 예정');
@@ -1508,15 +1745,17 @@ export default function Dashboard() {
 
     const rows = getRowsForSummaryType(summaryModalType);
     const typeLabelMap = {
+      total: '전체 충전기',
       fault: '고장 충전기',
       normal: '정상 운영',
       vocPending: 'VOC 조치 예정',
       uninbound: '미인입 고장',
-      replacement: '교체 예정',
+      replacement: '교체 진행중',
       manualOff: '임의 OFF',
     };
 
     const goFilterMap = {
+      total: 'all',
       fault: 'fault',
       normal: 'normal',
       vocPending: 'VOC 조치 예정',
@@ -1564,6 +1803,7 @@ export default function Dashboard() {
           siteId: row.siteId || '-',
           siteName: row.siteName || '-',
           address: shortAddress(row.address),
+          regionGroup: getRegionGroup(row.address),
           chargerCount: 0,
           installedTotal: installedSiteMap.get(siteKey) || 0,
           faultTotal: faultSiteMap.get(siteKey) || 0,
@@ -1599,7 +1839,7 @@ export default function Dashboard() {
 
     const regionMap = new Map();
     siteRows.forEach((site) => {
-      const regionKey = site.address || '지역 미기재';
+      const regionKey = site.regionGroup || '지역 미기재';
       if (!regionMap.has(regionKey)) {
         regionMap.set(regionKey, {
           region: regionKey,
@@ -1620,7 +1860,7 @@ export default function Dashboard() {
       }))
       .sort((a, b) => b.chargerCount - a.chargerCount || b.siteCount - a.siteCount || String(a.region).localeCompare(String(b.region)));
 
-    const faultTotalCount = mergedRows.filter((row) => row.isFault).length;
+    const faultTotalCount = mergedRows.filter((row) => isActiveFaultRow(row)).length;
 
     return {
       type: summaryModalType,
@@ -1648,12 +1888,15 @@ export default function Dashboard() {
   const goSummaryDetails = () => {
     if (!summaryModalData) return;
     setFaultFilter(summaryModalData.goFilter);
+    setDetailModelFilter('all');
     setTab('details');
     closeSummaryModal();
   };
 
-  const filteredRows = useMemo(() => {
-    return mergedRows.filter((row) => {
+  const detailModelOptions = useMemo(() => {
+    const modelMap = new Map();
+
+    mergedRows.forEach((row) => {
       const matchesSearch =
         !searchText ||
         [row.chargerId, row.siteName, row.address].some((value) =>
@@ -1664,7 +1907,7 @@ export default function Dashboard() {
         faultFilter === 'all'
           ? true
           : faultFilter === 'fault'
-            ? row.isFault
+            ? isActiveFaultRow(row)
             : faultFilter === 'approval'
               ? row.isApprovalPending
               : faultFilter === 'normal'
@@ -1685,9 +1928,56 @@ export default function Dashboard() {
       const matchesLongPending =
         longPendingFilter === 'all' ? true : longPendingFilter === 'only' ? row.isLongPending : true;
 
-      return matchesSearch && matchesFault && matchesRecurrence && matchesLongPending;
+      if (!matchesSearch || !matchesFault || !matchesRecurrence || !matchesLongPending) return;
+
+      const modelKey = row.chargerType || getChargerType(row.modelName) || '기타';
+      modelMap.set(modelKey, (modelMap.get(modelKey) || 0) + 1);
     });
+
+    return Array.from(modelMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name)));
   }, [mergedRows, searchText, faultFilter, recurrenceFilter, longPendingFilter]);
+
+  const filteredRows = useMemo(() => {
+    return mergedRows.filter((row) => {
+      const matchesSearch =
+        !searchText ||
+        [row.chargerId, row.siteName, row.address].some((value) =>
+          normalizeText(value).toLowerCase().includes(searchText.toLowerCase())
+        );
+
+      const matchesFault =
+        faultFilter === 'all'
+          ? true
+          : faultFilter === 'fault'
+            ? isActiveFaultRow(row)
+            : faultFilter === 'approval'
+              ? row.isApprovalPending
+              : faultFilter === 'normal'
+                ? row.isNormalOperation
+                : row.faultType === faultFilter;
+
+      const matchesRecurrence =
+        recurrenceFilter === 'all'
+          ? true
+          : recurrenceFilter === 'recurrence'
+            ? row.occurrenceCount >= 2 && row.partReplaceCount < 3 && row.reinboundCount < 3
+            : recurrenceFilter === 'part3'
+              ? row.partReplaceCount >= 3
+              : recurrenceFilter === 'reinbound3'
+                ? row.reinboundCount >= 3
+                : true;
+
+      const matchesLongPending =
+        longPendingFilter === 'all' ? true : longPendingFilter === 'only' ? row.isLongPending : true;
+
+      const rowModelKey = row.chargerType || getChargerType(row.modelName) || '기타';
+      const matchesModel = detailModelFilter === 'all' ? true : rowModelKey === detailModelFilter;
+
+      return matchesSearch && matchesFault && matchesModel && matchesRecurrence && matchesLongPending;
+    });
+  }, [mergedRows, searchText, faultFilter, detailModelFilter, recurrenceFilter, longPendingFilter]);
 
   const sortedFilteredRows = useMemo(() => {
     const rows = filteredRows.map((row, index) => ({ row, index }));
@@ -1966,7 +2256,7 @@ export default function Dashboard() {
       충전소명: row.siteName || '-',
       주소: row.address || '-',
       상세주소: row.detailAddress || '-',
-      상태: row.isFault ? '고장' : row.isApprovalPending ? '승인대기' : '정상 운영',
+      상태: row.isFault ? displayFaultTypeName(row.faultType) : row.isApprovalPending ? '승인대기' : '정상 운영',
       고장분류: row.faultType || '-',
       최근수집일: row.collectedAtText || '-',
       재발생여부: row.recurrenceLabel || '-',
@@ -2013,8 +2303,9 @@ export default function Dashboard() {
     setLongPendingFilter('all');
     setSortFilter('default');
     setOrgFilter('EV세상');
-    setVocPartStartDate('');
-    setVocPartEndDate('');
+    const recentWeekRange = getRecentWeekDateRange();
+    setVocPartStartDate(recentWeekRange.start);
+    setVocPartEndDate(recentWeekRange.end);
     setVocPartCompareMode('samePeriod');
     setVocPerformanceStartDate('');
     setVocPerformanceEndDate('');
@@ -2026,7 +2317,7 @@ export default function Dashboard() {
     { key: 'dashboard', label: '대시보드', icon: <IconGrid /> },
     { key: 'details', label: '상세내역', icon: <IconList /> },
     { key: 'search', label: '충전소 조회', icon: <IconSearch /> },
-    { key: 'voc', label: 'VOC 현황', icon: <IconVoc /> },
+    { key: 'voc', label: '출동 현황', icon: <IconVoc /> },
   ];
 
   if (isAdmin) {
@@ -2142,20 +2433,23 @@ export default function Dashboard() {
 
           {tab === 'dashboard' && (
             <>
-              <div style={styles.cardGrid}>
-                <StatCard title="전체 충전기" value={`${dashboard.total.toLocaleString()}기`} sub="RAW C열 충전기 ID 기준" />
+              <OperatingOverviewCard dashboard={dashboard} onTotalClick={() => openSummaryModal('total')} />
+
+              <div style={styles.faultDashboardGrid}>
                 <StatCard
-                  title="승인대기"
-                  value={`${dashboard.approvalPending.toLocaleString()}기`}
-                  sub="수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하"
+                  compact
+                  title="고장 충전기"
+                  value={`${dashboard.faultCount.toLocaleString()}기`}
+                  sub={<span style={{ fontSize: 17, fontWeight: 900, color: COLORS.text }}>고장률 {dashboard.faultRate}%</span>}
+                  onClick={() => openSummaryModal('fault')}
                 />
-                <StatCard
-                  title="정상 운영"
-                  value={`${dashboard.normalOperation.toLocaleString()}기`}
-                  sub="전체 충전기 - 승인대기"
-                  onClick={() => openSummaryModal('normal')}
-                />
-                <StatCard title="고장 충전기" value={`${dashboard.faultCount.toLocaleString()}기`} sub={`고장률 ${dashboard.faultRate}%`} onClick={() => openSummaryModal('fault')} />
+                <div style={{ ...styles.panel, ...styles.faultChartPanel }}>
+                  <div style={{ ...styles.sectionTitle, marginBottom: 6 }}>현재 고장 분류</div>
+                  <DonutChart dashboard={dashboard} />
+                </div>
+              </div>
+
+              <div style={styles.subCardGrid}>
                 <StatCard
                   title="VOC 조치 예정"
                   value={`${dashboard.vocPending.toLocaleString()}기`}
@@ -2165,18 +2459,11 @@ export default function Dashboard() {
                 <StatCard
                   title="미인입 고장"
                   value={`${dashboard.uninbound.toLocaleString()}기`}
-                  sub="임의 OFF / VOC 조치 예정 / 교체 예정 제외"
+                  sub="임의 OFF / VOC 조치 예정 / 교체 진행중 제외"
                   onClick={() => openSummaryModal('uninbound')}
                 />
-              </div>
-
-              <div style={styles.middleGrid}>
-                <StatCard title="교체 예정" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" onClick={() => openSummaryModal('replacement')} />
                 <StatCard title="임의 OFF" value={`${dashboard.manualOff.toLocaleString()}기`} sub="충전기 중 충전상태 기준" onClick={() => openSummaryModal('manualOff')} />
-                <div style={styles.panel}>
-                  <div style={styles.sectionTitle}>고장 분류</div>
-                  <DonutChart dashboard={dashboard} />
-                </div>
+                <StatCard title="교체 진행중" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" onClick={() => openSummaryModal('replacement')} />
               </div>
 
               <div style={styles.topGrid}>
@@ -2208,7 +2495,7 @@ export default function Dashboard() {
                     <li>RAW 상태정보 파일은 4행 헤더, 5행부터 데이터를 읽습니다.</li>
                     <li>전체 충전기 수는 RAW C열 충전기 ID 기준입니다.</li>
                     <li>승인대기는 수집일 공백 또는 수집이 멈춘 상태 중 누적사용량 30 이하입니다.</li>
-                    <li>고장 산정은 파일명 기준 시각인 07:00 이전 수집값 또는 과다이상 기준입니다.</li>
+                    <li>고장 산정은 파일명 기준 시각인 07:00 이전 수집값, 과다이상, 교체 진행중을 포함합니다.</li>
                     <li>VOC 처리중은 완료자명과 완료자 소속이 모두 공백인 기준입니다.</li>
                     <li>장기 미조치는 VOC 조치 예정 중 판정 기준일 대비 14일 이상 경과 건입니다.</li>
                   </ul>
@@ -2259,8 +2546,20 @@ export default function Dashboard() {
                   <option value="normal">정상 운영</option>
                   <option value="임의 OFF">임의 OFF</option>
                   <option value="VOC 조치 예정">VOC 조치 예정</option>
-                  <option value="교체 예정">교체 예정</option>
+                  <option value="교체 예정">교체 진행중</option>
                   <option value="미인입 고장">미인입 고장</option>
+                </select>
+                <select
+                  style={styles.selectWide}
+                  value={detailModelFilter}
+                  onChange={(e) => setDetailModelFilter(e.target.value)}
+                >
+                  <option value="all">모델 전체</option>
+                  {detailModelOptions.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name} ({item.count.toLocaleString()}기)
+                    </option>
+                  ))}
                 </select>
                 <select style={styles.select} value={recurrenceFilter} onChange={(e) => setRecurrenceFilter(e.target.value)}>
                   <option value="all">전체보기</option>
@@ -2648,19 +2947,168 @@ export default function Dashboard() {
 
 
 function SummaryModal({ data, onClose, onGoDetails }) {
+  const isTotalSummary = data.type === 'total';
   const isNormal = data.type === 'normal';
   const isFaultLike = ['fault', 'vocPending', 'uninbound', 'replacement', 'manualOff'].includes(data.type);
   const isManualOffSummary = data.type === 'manualOff';
+  const isFaultSummary = data.type === 'fault';
+  const hasRichAnalysis = ['total', 'fault', 'vocPending', 'uninbound', 'replacement'].includes(data.type);
+  const hasSpeedSummary = hasRichAnalysis || isManualOffSummary;
   const [analysisView, setAnalysisView] = useState('model');
   const [modelSortType, setModelSortType] = useState('faultRate');
   const [regionSortType, setRegionSortType] = useState('count');
   const [siteSortType, setSiteSortType] = useState('targetCount');
+  const [chargerSpeedFilter, setChargerSpeedFilter] = useState(isFaultSummary ? 'slow' : 'all');
 
-  const modelRows = data.modelCounts || [];
-  const regionRows = data.regionRows || [];
-  const siteRows = data.siteRows || [];
+  useEffect(() => {
+    setChargerSpeedFilter('all');
+    setAnalysisView('model');
+  }, [data.type]);
+
+  const filteredSummaryRows = useMemo(() => {
+    const rows = data.rows || [];
+    if (!hasSpeedSummary || chargerSpeedFilter === 'all') return rows;
+    return rows.filter((row) => getChargerSpeedGroup(row) === chargerSpeedFilter);
+  }, [data.rows, hasSpeedSummary, chargerSpeedFilter]);
+
+  const countBy = (items, getKey) => {
+    const map = new Map();
+    items.forEach((item) => {
+      const key = getKey(item) || '기타';
+      map.set(key, (map.get(key) || 0) + 1);
+    });
+    return Array.from(map.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  };
+
+  const buildRegionRows = (items) => {
+    const map = new Map();
+    items.forEach((row) => {
+      const regionKey = getRegionGroup(row.address);
+      if (!map.has(regionKey)) {
+        map.set(regionKey, {
+          region: regionKey,
+          chargerCount: 0,
+          siteSet: new Set(),
+          siteCount: 0,
+          shareRate: 0,
+        });
+      }
+      const regionItem = map.get(regionKey);
+      regionItem.chargerCount += 1;
+      regionItem.siteSet.add(row.siteId || row.siteName || '충전소ID 미기재');
+    });
+
+    return Array.from(map.values())
+      .map((region) => ({
+        region: region.region,
+        chargerCount: region.chargerCount,
+        siteCount: region.siteSet.size,
+        shareRate: items.length > 0 ? Math.round((region.chargerCount / items.length) * 1000) / 10 : 0,
+      }))
+      .sort((a, b) => b.chargerCount - a.chargerCount || b.siteCount - a.siteCount || String(a.region).localeCompare(String(b.region)));
+  };
+
+  const buildSiteRows = (items) => {
+    const map = new Map();
+    items.forEach((row) => {
+      const siteKey = row.siteId || row.siteName || '충전소ID 미기재';
+      if (!map.has(siteKey)) {
+        map.set(siteKey, {
+          siteKey,
+          siteId: row.siteId || '-',
+          siteName: row.siteName || '-',
+          address: shortAddress(row.address),
+          regionGroup: getRegionGroup(row.address),
+          chargerCount: 0,
+          latestCollectedAt: null,
+          latestCollectedAtText: '-',
+          modelMap: new Map(),
+        });
+      }
+
+      const siteItem = map.get(siteKey);
+      const modelKey = row.chargerType || getChargerType(row.modelName) || '기타';
+      siteItem.chargerCount += 1;
+      siteItem.modelMap.set(modelKey, (siteItem.modelMap.get(modelKey) || 0) + 1);
+      if (row.collectedAt && (!siteItem.latestCollectedAt || row.collectedAt > siteItem.latestCollectedAt)) {
+        siteItem.latestCollectedAt = row.collectedAt;
+        siteItem.latestCollectedAtText = formatShortDate(row.collectedAt);
+      }
+    });
+
+    return Array.from(map.values())
+      .map((site) => {
+        const modelEntries = Array.from(site.modelMap.entries())
+          .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+        const topModel = modelEntries[0]?.[0] || '-';
+        const extraModelCount = Math.max(modelEntries.length - 1, 0);
+        return {
+          ...site,
+          mainModel: extraModelCount > 0 ? `${compactModelLabel(topModel)} 외 ${extraModelCount}` : compactModelLabel(topModel),
+        };
+      })
+      .sort((a, b) => b.chargerCount - a.chargerCount || String(a.siteName).localeCompare(String(b.siteName)));
+  };
+
+  const buildManufacturerRows = (items) => {
+    const map = new Map();
+    items.forEach((row) => {
+      const manufacturerKey = getManufacturerGroup(row);
+      if (!map.has(manufacturerKey)) {
+        map.set(manufacturerKey, {
+          manufacturer: manufacturerKey,
+          chargerCount: 0,
+          siteSet: new Set(),
+          siteCount: 0,
+          shareRate: 0,
+        });
+      }
+      const manufacturerItem = map.get(manufacturerKey);
+      manufacturerItem.chargerCount += 1;
+      manufacturerItem.siteSet.add(row.siteId || row.siteName || '충전소ID 미기재');
+    });
+
+    return Array.from(map.values())
+      .map((manufacturer) => ({
+        manufacturer: manufacturer.manufacturer,
+        chargerCount: manufacturer.chargerCount,
+        siteCount: manufacturer.siteSet.size,
+        shareRate: items.length > 0 ? Math.round((manufacturer.chargerCount / items.length) * 1000) / 10 : 0,
+      }))
+      .sort((a, b) => b.chargerCount - a.chargerCount || b.siteCount - a.siteCount || String(a.manufacturer).localeCompare(String(b.manufacturer)));
+  };
+
+  const modelRows = useMemo(() => {
+    if (!hasSpeedSummary) return data.modelCounts || [];
+    return countBy(filteredSummaryRows, (row) => row.chargerType || getChargerType(row.modelName));
+  }, [data.modelCounts, filteredSummaryRows, hasSpeedSummary]);
+
+  const totalCount = hasSpeedSummary ? filteredSummaryRows.length : data.totalCount;
+  const uniqueSiteCount = hasSpeedSummary
+    ? new Set(filteredSummaryRows.map((row) => row.siteId || row.siteName || '충전소ID 미기재')).size
+    : data.uniqueSiteCount;
+  const speedTotalLabel = hasSpeedSummary ? getChargerSpeedLabel(chargerSpeedFilter) : '';
+  const summaryTargetLabel = hasSpeedSummary
+    ? (chargerSpeedFilter === 'all' ? data.title : `${speedTotalLabel} ${data.title}`)
+    : '충전기';
+
+  const regionRows = useMemo(
+    () => ((hasRichAnalysis || isManualOffSummary) ? buildRegionRows(filteredSummaryRows) : (data.regionRows || [])),
+    [hasRichAnalysis, isManualOffSummary, filteredSummaryRows, data.regionRows]
+  );
+  const manufacturerRows = useMemo(
+    () => (hasRichAnalysis ? buildManufacturerRows(filteredSummaryRows) : []),
+    [hasRichAnalysis, filteredSummaryRows]
+  );
+  const siteRows = useMemo(
+    () => (isManualOffSummary ? buildSiteRows(filteredSummaryRows) : (data.siteRows || [])),
+    [isManualOffSummary, filteredSummaryRows, data.siteRows]
+  );
   const maxModelCount = Math.max(...modelRows.map((item) => item.count || 0), 1);
   const maxRegionCount = Math.max(...regionRows.map((item) => item.chargerCount || 0), 1);
+  const maxManufacturerCount = Math.max(...manufacturerRows.map((item) => item.chargerCount || 0), 1);
   const maxSiteCount = Math.max(...siteRows.map((item) => item.chargerCount || 0), 1);
 
   const getInstalledTotal = (modelName) => data.installedModelMap?.get?.(modelName) || 0;
@@ -2670,8 +3118,8 @@ function SummaryModal({ data, onClose, onGoDetails }) {
       const count = item.count || 0;
       const installedTotal = getInstalledTotal(item.name);
       const installedRate = installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0;
-      const faultRate = data.totalCount > 0
-        ? Math.round((count / data.totalCount) * 1000) / 10
+      const faultRate = totalCount > 0
+        ? Math.round((count / totalCount) * 1000) / 10
         : 0;
 
       return {
@@ -2683,7 +3131,7 @@ function SummaryModal({ data, onClose, onGoDetails }) {
       };
     });
 
-    if (isNormal) return withMetrics;
+    if (isNormal || isTotalSummary) return withMetrics;
 
     return withMetrics.sort((a, b) => {
       if (modelSortType === 'installedRate') {
@@ -2698,7 +3146,7 @@ function SummaryModal({ data, onClose, onGoDetails }) {
       const diff = (b._faultRate || 0) - (a._faultRate || 0);
       return diff !== 0 ? diff : (b.count || 0) - (a.count || 0);
     });
-  }, [modelRows, data.totalCount, data.installedModelMap, modelSortType, isNormal]);
+  }, [modelRows, totalCount, data.installedModelMap, modelSortType, isNormal, isTotalSummary]);
 
   const sortedRegionRows = useMemo(() => {
     const withMetrics = regionRows.map((item, index) => ({
@@ -2718,6 +3166,25 @@ function SummaryModal({ data, onClose, onGoDetails }) {
       return (b.chargerCount || 0) - (a.chargerCount || 0) || (b.siteCount || 0) - (a.siteCount || 0);
     });
   }, [regionRows, regionSortType]);
+
+  const sortedManufacturerRows = useMemo(() => {
+    const withMetrics = manufacturerRows.map((item, index) => ({
+      ...item,
+      _originalIndex: index,
+    }));
+
+    return withMetrics.sort((a, b) => {
+      if (regionSortType === 'siteCount') {
+        return (b.siteCount || 0) - (a.siteCount || 0) || (b.chargerCount || 0) - (a.chargerCount || 0);
+      }
+
+      if (regionSortType === 'shareRate') {
+        return (b.shareRate || 0) - (a.shareRate || 0) || (b.chargerCount || 0) - (a.chargerCount || 0);
+      }
+
+      return (b.chargerCount || 0) - (a.chargerCount || 0) || (b.siteCount || 0) - (a.siteCount || 0);
+    });
+  }, [manufacturerRows, regionSortType]);
 
   const sortedSiteRows = useMemo(() => {
     const withMetrics = siteRows.map((item, index) => ({
@@ -2741,27 +3208,38 @@ function SummaryModal({ data, onClose, onGoDetails }) {
     });
   }, [siteRows, siteSortType]);
 
-  const isRegionView = isManualOffSummary && analysisView === 'region';
+  const isRegionView = (isManualOffSummary || hasRichAnalysis) && analysisView === 'region';
+  const isManufacturerView = hasRichAnalysis && analysisView === 'manufacturer';
   const isSiteView = isManualOffSummary && analysisView === 'site';
   const headerBadge = isRegionView
-    ? '지역 / 수량 / 충전소 / 비중'
-    : (isSiteView
-      ? '모델 / 수량 / 마지막 수집'
-      : (isNormal ? '수량 / 비중' : '수량 / 동일 기종 설치 대비 / 고장대비'));
+    ? '권역 / 수량 / 충전소 / 비중'
+    : (isManufacturerView
+      ? '제조사 / 수량 / 충전소 / 비중'
+      : (isSiteView
+        ? '모델 / 수량 / 마지막 수집'
+        : ((isNormal || isTotalSummary) ? '수량 / 비중' : '수량 / 동일 기종 설치 대비 / 고장대비')));
   const description = isRegionView
-    ? '지역별 임의 OFF 분포와 집중도를 먼저 확인합니다.'
-    : (isSiteView
-      ? '충전소별 대상 수량과 마지막 수집일을 확인합니다.'
-      : (isNormal
-        ? '정상 운영 충전기의 모델별 구성 비중을 확인합니다.'
-        : '모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.'));
+    ? (hasRichAnalysis
+      ? `${summaryTargetLabel}의 권역별 분포와 비중을 확인합니다.`
+      : '권역별 임의 OFF 분포와 집중도를 먼저 확인합니다.')
+    : (isManufacturerView
+      ? `${summaryTargetLabel}의 제조사별 설치 분포와 비중을 확인합니다.`
+      : (isSiteView
+        ? '충전소별 대상 수량과 마지막 수집일을 확인합니다.'
+        : (isFaultSummary
+          ? `${summaryTargetLabel}의 모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.`
+          : (isTotalSummary
+            ? `${summaryTargetLabel}의 모델별 구성 비중을 확인합니다.`
+            : (isNormal
+              ? '정상 운영 충전기의 모델별 구성 비중입니다.'
+              : '모델별 수량, 설치대비 비율, 고장대비 비율을 확인합니다.')))));
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
       <div style={styles.modelModalBox} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <div>
-            <div style={styles.modalEyebrow}>{isRegionView ? 'REGION SUMMARY' : (isSiteView ? 'SITE SUMMARY' : 'MODEL SUMMARY')}</div>
+            <div style={styles.modalEyebrow}>{isRegionView ? 'REGION SUMMARY' : (isManufacturerView ? 'MAKER SUMMARY' : (isSiteView ? 'SITE SUMMARY' : 'MODEL SUMMARY'))}</div>
             <div style={styles.modalTitle}>{data.title} 요약</div>
             <div style={styles.modalSubText}>{description}</div>
           </div>
@@ -2770,12 +3248,12 @@ function SummaryModal({ data, onClose, onGoDetails }) {
 
         <div style={styles.modalKpiGrid}>
           <div style={styles.modalKpiCard}>
-            <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🔌</span>총 충전기</div>
-            <div style={styles.modalKpiValue}>{data.totalCount.toLocaleString()}기</div>
+            <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🔌</span>{hasSpeedSummary ? summaryTargetLabel : '총 충전기'}</div>
+            <div style={styles.modalKpiValue}>{totalCount.toLocaleString()}기</div>
           </div>
           <div style={styles.modalKpiCard}>
             <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🏢</span>충전소 수량</div>
-            <div style={styles.modalKpiValue}>{data.uniqueSiteCount.toLocaleString()}개소</div>
+            <div style={styles.modalKpiValue}>{uniqueSiteCount.toLocaleString()}개소</div>
           </div>
           <div style={styles.modalKpiCard}>
             <div style={styles.modalKpiLabel}><span style={styles.modalKpiEmoji}>🍃</span>모델 분류</div>
@@ -2786,7 +3264,7 @@ function SummaryModal({ data, onClose, onGoDetails }) {
         <div style={styles.modelAnalysisBox}>
           <div style={styles.modelAnalysisHeader}>
             <div>
-              {isManualOffSummary && (
+              {(isManualOffSummary || hasRichAnalysis) && (
                 <div style={styles.analysisTabRow}>
                   <button
                     type="button"
@@ -2800,30 +3278,72 @@ function SummaryModal({ data, onClose, onGoDetails }) {
                     style={analysisView === 'region' ? styles.analysisTabActive : styles.analysisTab}
                     onClick={() => setAnalysisView('region')}
                   >
-                    지역별
+                    권역별
+                  </button>
+                  {hasRichAnalysis && (
+                    <button
+                      type="button"
+                      style={analysisView === 'manufacturer' ? styles.analysisTabActive : styles.analysisTab}
+                      onClick={() => setAnalysisView('manufacturer')}
+                    >
+                      제조사별
+                    </button>
+                  )}
+                  {isManualOffSummary && (
+                    <button
+                      type="button"
+                      style={analysisView === 'site' ? styles.analysisTabActive : styles.analysisTab}
+                      onClick={() => setAnalysisView('site')}
+                    >
+                      충전소별
+                    </button>
+                  )}
+                </div>
+              )}
+              {hasSpeedSummary && (
+                <div style={styles.analysisTabRow}>
+                  <button
+                    type="button"
+                    style={chargerSpeedFilter === 'all' ? styles.analysisTabActive : styles.analysisTab}
+                    onClick={() => setChargerSpeedFilter('all')}
+                  >
+                    전체
                   </button>
                   <button
                     type="button"
-                    style={analysisView === 'site' ? styles.analysisTabActive : styles.analysisTab}
-                    onClick={() => setAnalysisView('site')}
+                    style={chargerSpeedFilter === 'slow' ? styles.analysisTabActive : styles.analysisTab}
+                    onClick={() => setChargerSpeedFilter('slow')}
                   >
-                    충전소별
+                    완속
+                  </button>
+                  <button
+                    type="button"
+                    style={chargerSpeedFilter === 'fast' ? styles.analysisTabActive : styles.analysisTab}
+                    onClick={() => setChargerSpeedFilter('fast')}
+                  >
+                    급속
                   </button>
                 </div>
               )}
-              <div style={styles.modelAnalysisTitle}>{isRegionView ? '지역별 분석' : (isSiteView ? '충전소별 분석' : '모델별 분석')}</div>
+              <div style={styles.modelAnalysisTitle}>{isRegionView ? '권역별 분석' : (isManufacturerView ? '제조사별 분석' : (isSiteView ? '충전소별 분석' : (hasSpeedSummary ? `${summaryTargetLabel} 모델별 분석` : '모델별 분석')))}</div>
               <div style={styles.modelAnalysisDesc}>
                 {isRegionView
-                  ? '임의 OFF가 집중된 지역을 표와 막대 그래프로 먼저 확인합니다.'
-                  : (isSiteView
-                    ? '대상 수량이 많은 충전소와 마지막 수집일을 간단히 확인합니다.'
-                    : (isNormal
-                      ? '모델별 수량과 정상 운영 전체 대비 비중입니다.'
-                      : '설치대비는 해당 모델 전체 설치 수량 대비 현재 카드 대상 수량 비율입니다.'))}
+                  ? (hasRichAnalysis ? '권역별 수량과 충전소 분포를 표와 막대 그래프로 확인합니다.' : '임의 OFF가 집중된 권역을 표와 막대 그래프로 먼저 확인합니다.')
+                  : (isManufacturerView
+                    ? '모델분류명에서 언더바(_) 앞 문자를 기준으로 제조사를 묶어 확인합니다.'
+                    : (isSiteView
+                      ? '대상 수량이 많은 충전소와 마지막 수집일을 간단히 확인합니다.'
+                      : (hasRichAnalysis
+                        ? '기본값은 전체이며, 완속/급속을 선택해 모델별, 권역별, 제조사별 분포를 확인할 수 있습니다.'
+                        : (isManualOffSummary
+                          ? '기본값은 전체이며, 완속/급속을 선택해 임의 OFF 분포를 확인할 수 있습니다.'
+                          : (isNormal
+                          ? '모델별 수량과 정상 운영 전체 대비 비중입니다.'
+                          : '설치대비는 해당 모델 전체 설치 수량 대비 현재 카드 대상 수량 비율입니다.')))))}
               </div>
             </div>
             <div style={styles.modelAnalysisHeaderRight}>
-              {isRegionView ? (
+              {(isRegionView || isManufacturerView) ? (
                 <div style={styles.modelSortButtonRow}>
                   <span style={styles.modelSortLabel}>정렬기준</span>
                   <button
@@ -2874,7 +3394,7 @@ function SummaryModal({ data, onClose, onGoDetails }) {
                   </button>
                 </div>
               ) : (
-                !isNormal && (
+                !(isNormal || isTotalSummary) && (
                   <div style={styles.modelSortButtonRow}>
                     <span style={styles.modelSortLabel}>정렬기준</span>
                     <button
@@ -2922,7 +3442,47 @@ function SummaryModal({ data, onClose, onGoDetails }) {
 
                       <div style={styles.modelNameBlock}>
                         <div style={styles.modelName}>{item.region || '지역 미기재'}</div>
-                        <div style={styles.modelSub}>임의 OFF {count.toLocaleString()}기 · {siteCount.toLocaleString()}개소</div>
+                        <div style={styles.modelSub}>{isManualOffSummary ? '임의 OFF' : summaryTargetLabel} {count.toLocaleString()}기 · {siteCount.toLocaleString()}개소</div>
+                        <div style={styles.modelBarTrack}>
+                          <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
+                        </div>
+                      </div>
+
+                      <div style={styles.modelMetricGrid3}>
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>수량</div>
+                          <div style={styles.modelMetricValue}>{count.toLocaleString()}기</div>
+                        </div>
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>충전소</div>
+                          <div style={styles.modelMetricValue}>{siteCount.toLocaleString()}개소</div>
+                        </div>
+                        <div style={styles.modelMetricBox}>
+                          <div style={styles.modelMetricLabel}>비중</div>
+                          <div style={styles.modelMetricValue}>{shareRate}%</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )
+            ) : isManufacturerView ? (
+              manufacturerRows.length === 0 ? (
+                <div style={styles.modalEmpty}>표시할 데이터가 없습니다.</div>
+              ) : (
+                sortedManufacturerRows.map((item, idx) => {
+                  const count = item.chargerCount || 0;
+                  const siteCount = item.siteCount || 0;
+                  const shareRate = item.shareRate || 0;
+                  const barPercent = Math.min((count / maxManufacturerCount) * 100, 100);
+
+                  return (
+                    <div key={`${item.manufacturer}-${idx}`} style={styles.regionRowCard}>
+                      <div style={styles.modelRank}>{idx + 1}</div>
+
+                      <div style={styles.modelNameBlock}>
+                        <div style={styles.modelName}>{item.manufacturer || '기타'}</div>
+                        <div style={styles.modelSub}>{summaryTargetLabel} {count.toLocaleString()}기 · {siteCount.toLocaleString()}개소</div>
                         <div style={styles.modelBarTrack}>
                           <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
                         </div>
@@ -2988,10 +3548,10 @@ function SummaryModal({ data, onClose, onGoDetails }) {
                 sortedModelRows.map((item, idx) => {
                   const count = item.count || 0;
                   const installedTotal = item._installedTotal ?? getInstalledTotal(item.name);
-                  const normalPercent = data.totalCount > 0 ? Math.round((count / data.totalCount) * 1000) / 10 : 0;
+                  const normalPercent = totalCount > 0 ? Math.round((count / totalCount) * 1000) / 10 : 0;
                   const installedRate = item._installedRate ?? (installedTotal > 0 ? Math.round((count / installedTotal) * 1000) / 10 : 0);
-                  const faultRate = item._faultRate ?? (data.totalCount > 0
-                    ? Math.round((count / data.totalCount) * 1000) / 10
+                  const faultRate = item._faultRate ?? (totalCount > 0
+                    ? Math.round((count / totalCount) * 1000) / 10
                     : 0);
                   const barPercent = Math.min((count / maxModelCount) * 100, 100);
 
@@ -3004,20 +3564,22 @@ function SummaryModal({ data, onClose, onGoDetails }) {
                         <div style={styles.modelSub}>
                           {isNormal
                             ? `정상 운영 ${count.toLocaleString()}기 기준`
-                            : `설치 ${installedTotal.toLocaleString()}기 기준`}
+                            : (isTotalSummary
+                              ? `전체 충전기 ${count.toLocaleString()}기 기준`
+                              : `설치 ${installedTotal.toLocaleString()}기 기준`)}
                         </div>
                         <div style={styles.modelBarTrack}>
                           <div style={{ ...styles.modelBarFill, width: `${barPercent}%` }} />
                         </div>
                       </div>
 
-                      <div style={isNormal ? styles.modelMetricGrid2 : styles.modelMetricGrid3}>
+                      <div style={(isNormal || isTotalSummary) ? styles.modelMetricGrid2 : styles.modelMetricGrid3}>
                         <div style={styles.modelMetricBox}>
                           <div style={styles.modelMetricLabel}>수량</div>
                           <div style={styles.modelMetricValue}>{count.toLocaleString()}기</div>
                         </div>
 
-                        {isNormal ? (
+                        {(isNormal || isTotalSummary) ? (
                           <div style={styles.modelMetricBox}>
                             <div style={styles.modelMetricLabel}>비중</div>
                             <div style={styles.modelMetricValue}>{normalPercent}%</div>
@@ -3049,8 +3611,13 @@ function SummaryModal({ data, onClose, onGoDetails }) {
           {isManualOffSummary && (isRegionView || isSiteView) && (
             <div style={styles.modelFootnote}>
               {isRegionView
-                ? '※ 지역별 분석의 비중은 전체 임의 OFF 수량 대비 해당 지역 수량 비율입니다.'
+                ? '※ 권역별 분석의 비중은 현재 선택된 대상 수량 대비 해당 권역 수량 비율입니다.'
                 : '※ 충전소별 분석의 수량은 임의 OFF 수량이며, 마지막 수집은 해당 충전소 대상 충전기 중 가장 최근 수집일입니다.'}
+            </div>
+          )}
+          {isTotalSummary && isManufacturerView && (
+            <div style={styles.modelFootnote}>
+              ※ 제조사별 분석은 모델분류명에서 언더바(_) 앞 문자를 기준으로 묶습니다. 예: 에버온_구형대, 에버온_신형소 → 에버온
             </div>
           )}
         </div>
@@ -3194,7 +3761,7 @@ const styles = {
     background: COLORS.panel,
     color: COLORS.slate,
     border: `1px solid ${COLORS.border}`,
-    padding: '12px 14px',
+    padding: '9px 12px',
     borderRadius: 14,
     fontWeight: 700,
     cursor: 'pointer',
@@ -3319,6 +3886,86 @@ const styles = {
     fontWeight: 700,
   },
   cardGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 18, marginBottom: 18 },
+  operatingOverviewCard: {
+    position: 'relative',
+    overflow: 'hidden',
+    background: `linear-gradient(90deg, ${COLORS.blueSoft} 0%, #fffaf0 48%, ${COLORS.greenSoft} 100%)`,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 24,
+    padding: 22,
+    marginBottom: 18,
+    boxShadow: COLORS.shadow,
+  },
+  operatingOverviewHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 14,
+  },
+  operatingEyebrow: { fontSize: 12, fontWeight: 900, color: COLORS.slate, letterSpacing: '0.04em', marginBottom: 5 },
+  operatingTitle: { fontSize: 18, fontWeight: 900, color: COLORS.text, letterSpacing: '-0.02em' },
+  operatingHeaderBadge: {
+    border: `1px solid ${COLORS.border}`,
+    background: 'rgba(255,255,255,0.72)',
+    color: COLORS.slate,
+    padding: '8px 12px',
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 900,
+    whiteSpace: 'nowrap',
+  },
+  operatingConnectedGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1.15fr 0.75fr 1.10fr',
+    overflow: 'hidden',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 18,
+    background: 'rgba(255,255,255,0.68)',
+  },
+  operatingSegment: {
+    position: 'relative',
+    minHeight: 118,
+    padding: '18px 22px',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    borderRight: `1px solid ${COLORS.border}`,
+    transition: 'transform 0.15s ease, background 0.15s ease',
+  },
+  operatingSegmentTotal: { background: 'linear-gradient(135deg, rgba(234,242,255,0.96), rgba(255,255,255,0.72))' },
+  operatingSegmentApproval: { background: 'linear-gradient(135deg, rgba(255,245,231,0.94), rgba(255,255,255,0.72))' },
+  operatingSegmentNormal: { background: 'linear-gradient(135deg, rgba(235,251,241,0.96), rgba(255,255,255,0.72))', borderRight: 'none' },
+  operatingSegmentHeaderLine: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 },
+  operatingSegmentIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    display: 'grid',
+    placeItems: 'center',
+    background: COLORS.blueSoft,
+    boxShadow: 'inset 0 0 0 1px rgba(29,99,233,0.12)',
+  },
+  operatingSegmentIconTopRight: {
+    position: 'absolute',
+    top: 16,
+    right: 18,
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    display: 'grid',
+    placeItems: 'center',
+    background: 'rgba(234,242,255,0.92)',
+    boxShadow: 'inset 0 0 0 1px rgba(29,99,233,0.12)',
+  },
+  operatingSegmentTitle: { fontSize: 15, fontWeight: 900, marginBottom: 10 },
+  operatingSegmentValue: { fontSize: 34, fontWeight: 950, color: COLORS.text, letterSpacing: '-0.04em', marginBottom: 8 },
+  operatingSegmentSub: { fontSize: 13, color: COLORS.sub, fontWeight: 800, lineHeight: 1.45 },
+  operatingFootNote: { marginTop: 12, color: COLORS.sub, fontSize: 12, fontWeight: 700 },
+  topStatusGrid: { display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: 18, marginBottom: 18, alignItems: 'stretch' },
+  topMetricStack: { display: 'grid', gridTemplateRows: 'repeat(3, minmax(0, 1fr))', gap: 8, minHeight: 194 },
+  faultDashboardGrid: { display: 'grid', gridTemplateColumns: '440px minmax(0, 1fr)', gap: 18, marginBottom: 18, alignItems: 'stretch' },
+  subCardGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 18, marginBottom: 18 },
   middleGrid: { display: 'grid', gridTemplateColumns: '260px 260px 1fr', gap: 18, marginBottom: 18, alignItems: 'stretch' },
   topGrid: { display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 18, marginBottom: 18 },
   panel: {
@@ -3328,6 +3975,11 @@ const styles = {
     padding: 22,
     boxShadow: COLORS.shadow,
   },
+  faultChartPanel: {
+    background: 'linear-gradient(135deg, #ffffff 0%, #fafafa 58%, #f5f3ff 100%)',
+    border: `1px solid ${COLORS.violet}22`,
+    padding: '10px 18px',
+  },
   card: {
     position: 'relative',
     background: COLORS.panel,
@@ -3336,10 +3988,52 @@ const styles = {
     minHeight: 154,
     overflow: 'hidden',
   },
-  cardTopRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 10 },
+  compactCard: {
+    minHeight: 118,
+    padding: '14px 20px',
+  },
+  cardTopRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 8 },
   cardTitle: { fontSize: 14, fontWeight: 800, marginBottom: 4 },
-  cardValue: { fontSize: 30, fontWeight: 800, marginBottom: 12, letterSpacing: '-0.02em' },
+  cardValue: { fontSize: 30, fontWeight: 800, marginBottom: 8, letterSpacing: '-0.02em' },
   cardSub: { fontSize: 13, color: COLORS.sub, lineHeight: 1.55, maxWidth: '82%' },
+  heroStatusCard: {
+    position: 'relative',
+    background: COLORS.panel,
+    borderRadius: 22,
+    padding: '24px 32px',
+    minHeight: 194,
+    overflow: 'hidden',
+    boxShadow: COLORS.shadow,
+  },
+  heroStatusBody: { height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 28 },
+  heroStatusTitle: { fontSize: 16, fontWeight: 900, marginBottom: 14 },
+  heroStatusValue: { fontSize: 40, fontWeight: 900, marginBottom: 10, letterSpacing: '-0.04em' },
+  heroStatusSub: { fontSize: 14, color: COLORS.sub, lineHeight: 1.6, fontWeight: 700 },
+  heroMetricIconWrap: {
+    flexShrink: 0,
+    width: 64,
+    height: 64,
+    borderRadius: '50%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  topMiniMetric: {
+    background: COLORS.panel,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 18,
+    padding: '10px 16px',
+    boxShadow: COLORS.shadow,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    minHeight: 56,
+  },
+  topMiniTextArea: { minWidth: 0 },
+  topMiniTitle: { fontSize: 12.5, fontWeight: 900, marginBottom: 3, whiteSpace: 'nowrap' },
+  topMiniSub: { fontSize: 11, color: COLORS.sub, lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 310 },
+  topMiniValue: { flexShrink: 0, fontSize: 22, fontWeight: 900, letterSpacing: '-0.03em', color: COLORS.text },
   metricIconWrap: {
     width: 62,
     height: 62,
@@ -3360,12 +4054,12 @@ const styles = {
   sectionTitleNoMargin: { fontSize: 17, fontWeight: 800 },
   sectionTitleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 16, flexWrap: 'wrap' },
   detailActionRow: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap' },
-  donutLayout: { display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, alignItems: 'center' },
+  donutLayout: { display: 'grid', gridTemplateColumns: '170px minmax(0, 1fr)', gap: 14, alignItems: 'center' },
   donutWrap: { display: 'flex', justifyContent: 'center', alignItems: 'center' },
-  donut: { width: 190, height: 190, borderRadius: '50%', display: 'flex', justifyContent: 'center', alignItems: 'center' },
+  donut: { width: 150, height: 150, borderRadius: '50%', display: 'flex', justifyContent: 'center', alignItems: 'center' },
   donutInner: {
-    width: 104,
-    height: 104,
+    width: 78,
+    height: 78,
     borderRadius: '50%',
     background: '#fff',
     display: 'flex',
@@ -3374,8 +4068,9 @@ const styles = {
     flexDirection: 'column',
     boxShadow: 'inset 0 0 0 1px rgba(15,23,42,0.06)',
   },
-  donutLabel: { fontSize: 13, color: COLORS.sub },
-  donutValue: { fontSize: 22, fontWeight: 800, marginTop: 4 },
+  donutLabel: { fontSize: 11, color: COLORS.sub },
+  donutLegendStack: { display: 'grid', gap: 8, width: 390, maxWidth: '100%', justifySelf: 'start' },
+  donutValue: { fontSize: 18, fontWeight: 800, marginTop: 3 },
   legendItem: {
     display: 'flex',
     justifyContent: 'space-between',
@@ -3383,7 +4078,7 @@ const styles = {
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,
     borderRadius: 12,
-    padding: '12px 14px',
+    padding: '9px 12px',
   },
   infoLargeBox: {
     display: 'flex',
@@ -3431,7 +4126,7 @@ const styles = {
     width: '100%',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 12,
-    padding: '12px 14px',
+    padding: '9px 12px',
     fontSize: 14,
     boxSizing: 'border-box',
     background: '#fff',
@@ -3441,7 +4136,7 @@ const styles = {
     width: '100%',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 12,
-    padding: '12px 14px',
+    padding: '9px 12px',
     fontSize: 14,
     boxSizing: 'border-box',
     background: '#fff',
@@ -3451,7 +4146,17 @@ const styles = {
     width: '100%',
     border: `1px solid ${COLORS.border}`,
     borderRadius: 12,
-    padding: '12px 14px',
+    padding: '9px 12px',
+    fontSize: 14,
+    background: '#fff',
+    outline: 'none',
+  },
+  selectWide: {
+    width: '100%',
+    minWidth: 210,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 12,
+    padding: '9px 12px',
     fontSize: 14,
     background: '#fff',
     outline: 'none',
@@ -3460,7 +4165,7 @@ const styles = {
     background: '#f8fbff',
     border: `1px solid ${COLORS.line}`,
     borderRadius: 12,
-    padding: '12px 14px',
+    padding: '9px 12px',
     display: 'flex',
     alignItems: 'center',
   },

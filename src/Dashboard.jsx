@@ -454,6 +454,47 @@ function formatDateInputValue(date) {
   return `${y}-${m}-${d}`;
 }
 
+function isWeekendDate(date) {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+function getWeekdayElapsedHours(start, end) {
+  if (!start || !end || Number.isNaN(start.getTime?.()) || Number.isNaN(end.getTime?.())) return null;
+  if (end < start) return null;
+
+  let totalMs = 0;
+  const cursor = new Date(start);
+  cursor.setHours(0, 0, 0, 0);
+
+  const endDay = new Date(end);
+  endDay.setHours(0, 0, 0, 0);
+
+  // 접수~완료 사이 실제 시간 중 토/일 구간만 제외합니다.
+  while (cursor <= endDay) {
+    if (!isWeekendDate(cursor)) {
+      const dayStart = new Date(cursor);
+      const nextDay = new Date(cursor);
+      nextDay.setDate(nextDay.getDate() + 1);
+
+      const segmentStart = start > dayStart ? start : dayStart;
+      const segmentEnd = end < nextDay ? end : nextDay;
+
+      if (segmentEnd > segmentStart) totalMs += segmentEnd - segmentStart;
+    }
+
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return totalMs / (1000 * 60 * 60);
+}
+
+function isWithinSla48(receivedAt, completedAt) {
+  const hours = getWeekdayElapsedHours(receivedAt, completedAt);
+  if (hours === null) return null;
+  return hours <= 48;
+}
+
 function getRecentWeekDateRange() {
   const end = new Date();
   const start = new Date(end);
@@ -537,6 +578,139 @@ function extractPartNamesFromContent(value) {
       return regex.test(text);
     })
     .map(([name]) => name);
+}
+
+
+function normalizeActionKeyword(value) {
+  return normalizeText(value)
+    .replace(/[\[\]{}()]/g, ' ')
+    .replace(/[·ㆍ.,:;|/\\-]/g, ' ')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+
+function isEvSesangOrg(value) {
+  const compact = normalizeActionKeyword(value);
+  return compact.includes('ev세상') || compact.includes('이브이세상') || compact.includes('evsesang');
+}
+
+function classifyCompletedAction(value) {
+  const original = normalizeText(value);
+  const compact = normalizeActionKeyword(original);
+  if (!compact) return { type: '미분류', label: '미분류' };
+
+  const isHqTransfer = /본사(이관|조치|처리|요청|문의|확인)|제조사(이관|조치|처리|요청|문의|확인)|연구소(이관|요청|확인)|개발(요청|이관|확인)/i.test(compact);
+  if (isHqTransfer) {
+    return { type: '본사이관', label: '본사이관' };
+  }
+
+  // 완료내용이 "단순조치_차단기트립", "단순 처리 / 전원 리셋"처럼 적힌 경우가 많아서
+  // 단순 계열 키워드는 부품 키워드보다 먼저 판단합니다.
+  const isSimpleAction = /단순(조치|처리|완료|복구)|현장(조치|처리|복구|완료)|원격(조치|처리|복구|완료)|전원(리셋|재부팅|온오프|투입|복구)|차단기(트립|복구|리셋|올림|투입)|정상(확인|충전|동작|처리|복구)|조치완료|처리완료|복구완료|재부팅|리셋|초기화|커넥터재삽입|통신복구|상태복구|어플(재시작|재실행)|앱(재시작|재실행)/i.test(compact);
+  const hasExplicitPartPrefix = /(부품|자재)(사용|교체|투입|장착|교환)|^(보드|메인보드|안드로이드보드|lcd|케이블|커넥터|모뎀|통신모듈|파워모듈|릴레이|rcd).*(교체|사용|투입|장착|교환)/i.test(compact);
+
+  if (isSimpleAction && !hasExplicitPartPrefix) {
+    return { type: '단순조치', label: '단순조치' };
+  }
+
+  const detectedParts = extractPartNamesFromContent(original);
+  const hasPartKeyword = /(부품|자재|보드|케이블|커넥터|lcd|안드로이드|메인보드|모뎀|통신모듈|파워모듈|릴레이|rcd)/i.test(compact);
+  const hasUseOrReplace = /(교체|사용|투입|장착|교환|설치)/i.test(compact);
+  if (detectedParts.length > 0 || /부품(사용|교체|투입)|자재(사용|교체|투입)/i.test(compact) || (hasPartKeyword && hasUseOrReplace)) {
+    return { type: '부품사용', label: '부품사용' };
+  }
+
+  if (isSimpleAction) {
+    return { type: '단순조치', label: '단순조치' };
+  }
+
+  return { type: '미분류', label: '미분류' };
+}
+
+function extractActionPartNames(value) {
+  const text = normalizeText(value);
+  if (!text) return ['미기재'];
+
+  const knownParts = extractPartNamesFromContent(text);
+  const found = new Set(knownParts);
+
+  const normalized = text.replace(/\s+/g, ' ');
+  const patterns = [
+    /(?:부품|자재)\s*(?:사용|교체)\s*[_:\- ]+\s*([^\n\r\[/,，]+)/gi,
+    /([가-힣A-Za-z0-9+\- ]{2,30})\s*(?:교체|사용|장착|교환)/gi,
+  ];
+
+  patterns.forEach((regex) => {
+    let match;
+    while ((match = regex.exec(normalized)) !== null) {
+      const part = normalizeText(match[1])
+        .replace(/^(부품|자재|단순|본사|제조사)\s*/i, '')
+        .replace(/(후|및|완료|진행|처리)$/i, '')
+        .trim();
+      if (part && part.length >= 2 && !/^(조치|처리|확인|정상|현장|원격)$/.test(part)) {
+        found.add(part.length > 24 ? `${part.slice(0, 24)}...` : part);
+      }
+    }
+  });
+
+  return found.size ? Array.from(found) : ['부품명 미기재'];
+}
+
+function percentOf(value, total) {
+  if (!total) return 0;
+  return Math.round((value / total) * 1000) / 10;
+}
+
+function getActionModelProfile(row) {
+  const total = row?.total || 0;
+  const simpleRate = percentOf(row?.simple || 0, total);
+  const partRate = percentOf(row?.part || 0, total);
+  const hqRate = percentOf(row?.hq || 0, total);
+  const unknownRate = percentOf(row?.unknown || 0, total);
+
+  if (partRate >= 30) {
+    return {
+      label: '부품 점검 필요',
+      color: COLORS.orange,
+      soft: COLORS.orangeSoft,
+      insight: '부품성 조치 비중이 높아 주요 부품 반복 여부 확인 권장',
+    };
+  }
+
+  if (hqRate >= 15) {
+    return {
+      label: '기술지원 필요',
+      color: COLORS.violet,
+      soft: COLORS.violetSoft,
+      insight: '본사/제조사 확인 비중이 높아 원인 분석 대상',
+    };
+  }
+
+  if (simpleRate >= 70) {
+    return {
+      label: '현장 복구 중심',
+      color: COLORS.green,
+      soft: COLORS.greenSoft,
+      insight: '대부분 현장·원격 조치로 복구되는 모델',
+    };
+  }
+
+  if (unknownRate >= 20) {
+    return {
+      label: '키워드 검토 필요',
+      color: COLORS.slate,
+      soft: COLORS.slateSoft,
+      insight: '완료내용 표현이 다양해 분류 키워드 보강 필요',
+    };
+  }
+
+  return {
+    label: '혼합 조치형',
+    color: COLORS.blue,
+    soft: COLORS.blueSoft,
+    insight: '단순조치·부품사용·이관이 혼합된 일반 패턴',
+  };
 }
 
 function summarizeAfterContent(value) {
@@ -1385,6 +1559,10 @@ export default function Dashboard() {
   const [vocPerformanceStartDate, setVocPerformanceStartDate] = useState('');
   const [vocPerformanceEndDate, setVocPerformanceEndDate] = useState('');
   const [vocPerformanceSortFilter, setVocPerformanceSortFilter] = useState('rateDesc');
+  const [actionStartDate, setActionStartDate] = useState(() => getRecentWeekDateRange().start);
+  const [actionEndDate, setActionEndDate] = useState(() => getRecentWeekDateRange().end);
+  const [actionModelFilter, setActionModelFilter] = useState('all');
+  const [selectedActionModel, setSelectedActionModel] = useState(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [summaryModalType, setSummaryModalType] = useState(null);
 
@@ -2055,7 +2233,7 @@ export default function Dashboard() {
       const safeName = name || '(미기재)';
       const key = `${safeOrg}__${safeName}`;
       if (!map.has(key)) {
-        map.set(key, { org: safeOrg, name: safeName, received: 0, completed: 0, pending: 0 });
+        map.set(key, { org: safeOrg, name: safeName, received: 0, completed: 0, pending: 0, within48: 0, after48: 0 });
       }
       return map.get(key);
     };
@@ -2076,7 +2254,12 @@ export default function Dashboard() {
 
       if (row.isCompleted && row.completedAt && isInVocPerformanceRange(row.completedAt)) {
         if (orgFilter === 'all' || completedOrg === orgFilter) {
-          ensure(completedOrg, completedName).completed += 1;
+          const stat = ensure(completedOrg, completedName);
+          stat.completed += 1;
+
+          const withinSla = isWithinSla48(row.receivedAt, row.completedAt);
+          if (withinSla === true) stat.within48 += 1;
+          else if (withinSla === false) stat.after48 += 1;
         }
       }
 
@@ -2091,10 +2274,19 @@ export default function Dashboard() {
       .map((row) => {
         const denominator = row.completed + row.pending;
         const completionRate = denominator > 0 ? Math.round((row.completed / denominator) * 1000) / 10 : 0;
-        return { ...row, completionRate };
+        const slaDenominator = row.within48 + row.after48;
+        const slaRate = slaDenominator > 0 ? Math.round((row.within48 / slaDenominator) * 1000) / 10 : 0;
+        return { ...row, completionRate, slaRate };
       })
       .filter((row) => row.received > 0 || row.completed > 0 || row.pending > 0)
       .sort((a, b) => {
+        if (vocPerformanceSortFilter === 'slaDesc') {
+          const diff = (b.slaRate || 0) - (a.slaRate || 0);
+          if (diff !== 0) return diff;
+          const withinDiff = (b.within48 || 0) - (a.within48 || 0);
+          return withinDiff !== 0 ? withinDiff : (b.completed || 0) - (a.completed || 0);
+        }
+
         if (vocPerformanceSortFilter === 'rateDesc') {
           const diff = (b.completionRate || 0) - (a.completionRate || 0);
           if (diff !== 0) return diff;
@@ -2121,10 +2313,16 @@ export default function Dashboard() {
     const totalReceived = vocPerformanceStats.reduce((sum, row) => sum + row.received, 0);
     const totalCompleted = vocPerformanceStats.reduce((sum, row) => sum + row.completed, 0);
     const totalPending = vocPerformanceStats.reduce((sum, row) => sum + row.pending, 0);
+    const totalWithin48 = vocPerformanceStats.reduce((sum, row) => sum + row.within48, 0);
+    const totalAfter48 = vocPerformanceStats.reduce((sum, row) => sum + row.after48, 0);
     const denominator = totalCompleted + totalPending;
     const completionRate = denominator > 0 ? Math.round((totalCompleted / denominator) * 1000) / 10 : 0;
-    return { totalReceived, totalCompleted, totalPending, completionRate };
+    const slaDenominator = totalWithin48 + totalAfter48;
+    const slaRate = slaDenominator > 0 ? Math.round((totalWithin48 / slaDenominator) * 1000) / 10 : 0;
+    return { totalReceived, totalCompleted, totalPending, totalWithin48, totalAfter48, completionRate, slaRate };
   }, [vocPerformanceStats]);
+
+  const isVocSlaSortMode = vocPerformanceSortFilter === 'slaDesc';
 
   const vocDateFilteredRows = useMemo(() => {
     const start = vocPartStartDate ? new Date(`${vocPartStartDate}T00:00:00`) : null;
@@ -2150,7 +2348,7 @@ export default function Dashboard() {
           siteId: v.matchBaseId,
           chargerId: v.matchId || `${v.matchBaseId}-01`,
           siteName: v.siteName || '-',
-          completedAtText: formatDate(v.completedAt),
+          completedAtText: v.completedAt ? formatDate(v.completedAt) : '-',
           usedParts: detectedParts.join(', '),
           summaryContent: summarizeAfterContent(v.completedContent),
           fullContent: v.completedContent,
@@ -2249,6 +2447,215 @@ export default function Dashboard() {
       });
   }, [vocRows, partUsageRows, vocPartCompareRange]);
 
+
+  const actionStatusBaseRows = useMemo(() => {
+    const start = actionStartDate ? new Date(`${actionStartDate}T00:00:00`) : null;
+    const end = actionEndDate ? new Date(`${actionEndDate}T23:59:59`) : null;
+
+    const exactModelMap = new Map();
+    const baseModelMap = new Map();
+    const siteModelMap = new Map();
+
+    mergedRows.forEach((row) => {
+      const model = row.chargerType || getChargerType(row.modelName) || '기타';
+      if (row.chargerId && !exactModelMap.has(row.chargerId)) exactModelMap.set(row.chargerId, model);
+      if (row.chargerBaseId && !baseModelMap.has(row.chargerBaseId)) baseModelMap.set(row.chargerBaseId, model);
+      const siteKey = normalizeSiteName(row.siteName);
+      if (siteKey && !siteModelMap.has(siteKey)) siteModelMap.set(siteKey, model);
+    });
+
+    return vocRows
+      .filter((v) => {
+        if (!isEvSesangOrg(v.completedOrg)) return false;
+        if (!v.completedContent) return false;
+        if (!v.completedAt && (start || end)) return false;
+        if (start && v.completedAt < start) return false;
+        if (end && v.completedAt > end) return false;
+        return true;
+      })
+      .map((v, idx) => {
+        const model =
+          exactModelMap.get(v.matchId) ||
+          baseModelMap.get(v.matchBaseId) ||
+          siteModelMap.get(v.matchSiteName) ||
+          '기타';
+        const action = classifyCompletedAction(v.completedContent);
+        const parts = action.type === '부품사용' ? extractActionPartNames(v.completedContent) : [];
+
+        return {
+          key: `${v.matchId || v.siteName || 'voc'}-${idx}`,
+          model,
+          actionType: action.type,
+          actionLabel: action.label,
+          parts,
+          siteName: v.siteName || '-',
+          chargerId: v.matchId || (v.matchBaseId ? `${v.matchBaseId}-01` : '-'),
+          completedAtText: v.completedAt ? formatDate(v.completedAt) : '-',
+          completedName: v.completedName || '-',
+          completedContent: v.completedContent || '-',
+        };
+      });
+  }, [vocRows, mergedRows, actionStartDate, actionEndDate]);
+
+  const actionStatusRows = useMemo(() => {
+    return actionStatusBaseRows.filter((row) => actionModelFilter === 'all' || row.model === actionModelFilter);
+  }, [actionStatusBaseRows, actionModelFilter]);
+
+  const actionModelOptions = useMemo(() => {
+    const counts = new Map();
+    actionStatusBaseRows.forEach((row) => counts.set(row.model, (counts.get(row.model) || 0) + 1));
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'ko'));
+  }, [actionStatusBaseRows]);
+
+  const actionSummary = useMemo(() => {
+    const total = actionStatusRows.length;
+    const simple = actionStatusRows.filter((row) => row.actionType === '단순조치').length;
+    const part = actionStatusRows.filter((row) => row.actionType === '부품사용').length;
+    const hq = actionStatusRows.filter((row) => row.actionType === '본사이관').length;
+    const unknown = actionStatusRows.filter((row) => row.actionType === '미분류').length;
+    return { total, simple, part, hq, unknown };
+  }, [actionStatusRows]);
+
+  const actionModelStats = useMemo(() => {
+    const map = new Map();
+    actionStatusRows.forEach((row) => {
+      if (!map.has(row.model)) {
+        map.set(row.model, { model: row.model, total: 0, simple: 0, part: 0, hq: 0, unknown: 0, topParts: [] });
+      }
+      const item = map.get(row.model);
+      item.total += 1;
+      if (row.actionType === '단순조치') item.simple += 1;
+      else if (row.actionType === '부품사용') item.part += 1;
+      else if (row.actionType === '본사이관') item.hq += 1;
+      else item.unknown += 1;
+    });
+
+    const partByModel = new Map();
+    actionStatusRows.forEach((row) => {
+      if (row.actionType !== '부품사용') return;
+      if (!partByModel.has(row.model)) partByModel.set(row.model, new Map());
+      const partMap = partByModel.get(row.model);
+      row.parts.forEach((part) => partMap.set(part, (partMap.get(part) || 0) + 1));
+    });
+
+    return Array.from(map.values())
+      .map((item) => {
+        const partMap = partByModel.get(item.model) || new Map();
+        const topParts = Array.from(partMap.entries())
+          .map(([part, count]) => ({ part, count }))
+          .sort((a, b) => b.count - a.count || a.part.localeCompare(b.part, 'ko'))
+          .slice(0, 3);
+        const simpleRate = percentOf(item.simple, item.total);
+        const partRate = percentOf(item.part, item.total);
+        const hqRate = percentOf(item.hq, item.total);
+        const unknownRate = percentOf(item.unknown, item.total);
+        return { ...item, topParts, simpleRate, partRate, hqRate, unknownRate, profile: getActionModelProfile(item) };
+      })
+      .sort((a, b) => b.total - a.total || a.model.localeCompare(b.model, 'ko'));
+  }, [actionStatusRows]);
+
+  const selectedActionModelRows = useMemo(() => {
+    if (!selectedActionModel) return [];
+    return actionStatusRows.filter((row) => row.model === selectedActionModel);
+  }, [actionStatusRows, selectedActionModel]);
+
+  const selectedActionModelStat = useMemo(() => {
+    if (!selectedActionModel) return null;
+    return actionModelStats.find((row) => row.model === selectedActionModel) || null;
+  }, [actionModelStats, selectedActionModel]);
+
+  const selectedActionModelInsight = useMemo(() => {
+    if (!selectedActionModelStat) return null;
+
+    const partMap = new Map();
+    const siteMap = new Map();
+    const examples = { 단순조치: [], 부품사용: [], 본사이관: [], 미분류: [] };
+
+    selectedActionModelRows.forEach((row) => {
+      const siteKey = row.siteName && row.siteName !== '-' ? row.siteName : '충전소명 없음';
+      siteMap.set(siteKey, (siteMap.get(siteKey) || 0) + 1);
+
+      if (row.actionType === '부품사용') {
+        const parts = row.parts?.length ? row.parts : ['부품명 미기재'];
+        parts.forEach((part) => partMap.set(part, (partMap.get(part) || 0) + 1));
+      }
+
+      if (examples[row.actionType] && examples[row.actionType].length < 3) {
+        examples[row.actionType].push(row.completedContent || '-');
+      }
+    });
+
+    const topParts = Array.from(partMap.entries())
+      .map(([part, count]) => ({ part, count, rate: percentOf(count, selectedActionModelStat.part) }))
+      .sort((a, b) => b.count - a.count || a.part.localeCompare(b.part, 'ko'))
+      .slice(0, 5);
+
+    const topSites = Array.from(siteMap.entries())
+      .map(([siteName, count]) => ({ siteName, count, rate: percentOf(count, selectedActionModelStat.total) }))
+      .sort((a, b) => b.count - a.count || a.siteName.localeCompare(b.siteName, 'ko'))
+      .slice(0, 5);
+
+    const profile = selectedActionModelStat.profile || getActionModelProfile(selectedActionModelStat);
+    const mainPart = topParts[0];
+    const mainSite = topSites[0];
+    const diagnosis = mainPart
+      ? `${selectedActionModelStat.model}은 ${profile.label} 패턴이며, 부품사용 중 ${mainPart.part} 비중이 가장 높습니다.`
+      : `${selectedActionModelStat.model}은 ${profile.label} 패턴이며, 현재 선택 기간에는 부품사용 상세가 거의 없습니다.`;
+    const siteInsight = mainSite
+      ? `${mainSite.siteName}에서 ${mainSite.count.toLocaleString()}건이 확인되어 특정 현장 반복 여부를 함께 확인하는 것이 좋습니다.`
+      : '반복 발생 충전소 데이터가 부족합니다.';
+
+    return { topParts, topSites, examples, diagnosis, siteInsight, profile };
+  }, [selectedActionModelRows, selectedActionModelStat]);
+
+  const actionPartStats = useMemo(() => {
+    const map = new Map();
+    actionStatusRows.forEach((row) => {
+      if (row.actionType !== '부품사용') return;
+      row.parts.forEach((part) => {
+        if (!map.has(part)) map.set(part, { part, count: 0, models: new Map() });
+        const item = map.get(part);
+        item.count += 1;
+        item.models.set(row.model, (item.models.get(row.model) || 0) + 1);
+      });
+    });
+
+    return Array.from(map.values())
+      .map((item) => ({
+        part: item.part,
+        count: item.count,
+        topModels: Array.from(item.models.entries())
+          .map(([model, count]) => ({ model, count }))
+          .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model, 'ko'))
+          .slice(0, 3),
+      }))
+      .sort((a, b) => b.count - a.count || a.part.localeCompare(b.part, 'ko'));
+  }, [actionStatusRows]);
+
+  const actionUnknownRows = useMemo(() => {
+    return actionStatusRows.filter((row) => row.actionType === '미분류').slice(0, 30);
+  }, [actionStatusRows]);
+
+  const downloadActionStatusExcel = () => {
+    const exportRows = actionStatusRows.map((row) => ({
+      모델: row.model || '-',
+      조치분류: row.actionLabel || '-',
+      주요부품: row.parts?.length ? row.parts.join(', ') : '-',
+      충전소명: row.siteName || '-',
+      충전기ID: row.chargerId || '-',
+      완료일시: row.completedAtText || '-',
+      완료자명: row.completedName || '-',
+      완료내용: row.completedContent || '-',
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '고장조치현황');
+    XLSX.writeFile(wb, `고장조치현황_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const downloadDetailsExcel = () => {
     const exportRows = sortedFilteredRows.map((row) => ({
       충전소ID: row.siteId || '-',
@@ -2310,6 +2717,10 @@ export default function Dashboard() {
     setVocPerformanceStartDate('');
     setVocPerformanceEndDate('');
     setVocPerformanceSortFilter('rateDesc');
+    const actionRecentWeekRange = getRecentWeekDateRange();
+    setActionStartDate(actionRecentWeekRange.start);
+    setActionEndDate(actionRecentWeekRange.end);
+    setActionModelFilter('all');
     setSummaryModalType(null);
   };
 
@@ -2318,6 +2729,7 @@ export default function Dashboard() {
     { key: 'details', label: '상세내역', icon: <IconList /> },
     { key: 'search', label: '충전소 조회', icon: <IconSearch /> },
     { key: 'voc', label: '출동 현황', icon: <IconVoc /> },
+    { key: 'actionStatus', label: '고장 조치 현황', icon: <IconList /> },
   ];
 
   if (isAdmin) {
@@ -2678,10 +3090,10 @@ export default function Dashboard() {
                   <div style={styles.vocControlBox}>
                     <select style={styles.vocSortSelect} value={vocPerformanceSortFilter} onChange={(e) => setVocPerformanceSortFilter(e.target.value)}>
                       <option value="rateDesc">정렬기준: 완료율 높은 순</option>
+                      <option value="slaDesc">정렬기준: SLA 높은 순</option>
                       <option value="receivedDesc">접수 많은 순</option>
                       <option value="completedDesc">완료 많은 순</option>
                       <option value="pendingDesc">진행 중 많은 순</option>
-                      <option value="rateDesc">완료율 높은 순</option>
                     </select>
                     <div style={styles.vocDateBox}>
                       <input type="date" style={styles.vocDateInput} value={vocPerformanceStartDate} onChange={(e) => setVocPerformanceStartDate(e.target.value)} />
@@ -2694,8 +3106,15 @@ export default function Dashboard() {
                 <div style={styles.vocKpiGrid}>
                   <VocKpiCard label="총 접수" value={`${vocPerformanceSummary.totalReceived.toLocaleString()}건`} hint="B열 접수일시 기준" color={COLORS.blue} bg={COLORS.blueSoft} />
                   <VocKpiCard label="완료" value={`${vocPerformanceSummary.totalCompleted.toLocaleString()}건`} hint="R열 완료일시 기준" color={COLORS.green} bg={COLORS.greenSoft} />
-                  <VocKpiCard label="진행중" value={`${vocPerformanceSummary.totalPending.toLocaleString()}건`} hint="접수 기간 내 완료일시 공백" color={COLORS.orange} bg={COLORS.orangeSoft} />
-                  <VocKpiCard label="완료율" value={`${vocPerformanceSummary.completionRate}%`} hint="완료 / (완료 + 진행중)" color={COLORS.violet} bg={COLORS.violetSoft} />
+                  <VocKpiCard label="진행중" value={`${vocPerformanceSummary.totalPending.toLocaleString()}건`} hint="미완료 VOC 기준" color={COLORS.orange} bg={COLORS.orangeSoft} />
+                  <VocKpiCard label="완료율" value={`${vocPerformanceSummary.completionRate}%`} hint="완료 / 완료+진행중" color={COLORS.violet} bg={COLORS.violetSoft} />
+                  {isVocSlaSortMode && (
+                    <>
+                      <VocKpiCard label="48시간 이내" value={`${vocPerformanceSummary.totalWithin48.toLocaleString()}건`} hint="주말 제외 접수~완료 48h 이내" color={COLORS.blue} bg={COLORS.blueSoft} />
+                      <VocKpiCard label="48시간 이후" value={`${vocPerformanceSummary.totalAfter48.toLocaleString()}건`} hint="주말 제외 접수~완료 48h 초과" color={COLORS.orange} bg={COLORS.orangeSoft} />
+                      <VocKpiCard label="SLA" value={`${vocPerformanceSummary.slaRate}%`} hint="48시간 이내 / 완료건" color={COLORS.violet} bg={COLORS.violetSoft} />
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -2717,6 +3136,9 @@ export default function Dashboard() {
                         <th>총 접수</th>
                         <th>완료</th>
                         <th>진행중</th>
+                        {isVocSlaSortMode && <th>48시간 이내</th>}
+                        {isVocSlaSortMode && <th>48시간 이후</th>}
+                        {isVocSlaSortMode && <th>SLA</th>}
                         <th>완료율</th>
                       </tr>
                     </thead>
@@ -2729,6 +3151,16 @@ export default function Dashboard() {
                           <td>{row.received.toLocaleString()}건</td>
                           <td><span style={styles.completeBadge}>{row.completed.toLocaleString()}건</span></td>
                           <td><span style={styles.pendingBadge}>{row.pending.toLocaleString()}건</span></td>
+                          {isVocSlaSortMode && <td><span style={styles.completeBadge}>{row.within48.toLocaleString()}건</span></td>}
+                          {isVocSlaSortMode && <td><span style={styles.pendingBadge}>{row.after48.toLocaleString()}건</span></td>}
+                          {isVocSlaSortMode && (
+                            <td>
+                              <div style={styles.rateCell}>
+                                <div style={styles.rateTrack}><div style={{ ...styles.rateFill, width: `${Math.min(row.slaRate, 100)}%` }} /></div>
+                                <strong>{row.slaRate}%</strong>
+                              </div>
+                            </td>
+                          )}
                           <td>
                             <div style={styles.rateCell}>
                               <div style={styles.rateTrack}><div style={{ ...styles.rateFill, width: `${Math.min(row.completionRate, 100)}%` }} /></div>
@@ -2739,7 +3171,7 @@ export default function Dashboard() {
                       ))}
                       {vocPerformanceStats.length === 0 && (
                         <tr>
-                          <td colSpan="7" style={{ color: COLORS.sub, textAlign: 'center', padding: 24 }}>선택한 기간의 VOC 처리 데이터가 없습니다.</td>
+                          <td colSpan={isVocSlaSortMode ? 10 : 7} style={{ color: COLORS.sub, textAlign: 'center', padding: 24 }}>선택한 기간의 VOC 처리 데이터가 없습니다.</td>
                         </tr>
                       )}
                     </tbody>
@@ -2831,6 +3263,304 @@ export default function Dashboard() {
                 </div>
                 {partUsageRows.length === 0 && (
                   <div style={{ color: COLORS.sub, fontSize: 13, marginTop: 8 }}>선택한 기간의 부품 교체 내역이 없습니다.</div>
+                )}
+              </div>
+            </div>
+          )}
+
+
+          {tab === 'actionStatus' && (
+            <div style={styles.vocLayout}>
+              <div style={styles.vocHeroPanel}>
+                <div style={styles.vocHeroTop}>
+                  <div>
+                    <div style={styles.vocEyebrow}>FAULT ACTION ANALYSIS</div>
+                    <div style={styles.vocHeroTitle}>고장 조치 현황</div>
+                    <div style={styles.vocHeroSub}>VOC 완료자소속(T열)이 EV세상인 건만 기준으로, 완료내용(U열)의 단순조치·부품사용·본사이관 비율을 분석합니다.</div>
+                  </div>
+                  <div style={styles.vocControlBox}>
+                    <select
+                      style={styles.vocSortSelect}
+                      value={actionModelFilter}
+                      onChange={(e) => {
+                        setActionModelFilter(e.target.value);
+                        setSelectedActionModel(null);
+                      }}
+                    >
+                      <option value="all">모델 전체</option>
+                      {actionModelOptions.map((item) => (
+                        <option key={item.name} value={item.name}>{item.name} ({item.count.toLocaleString()}건)</option>
+                      ))}
+                    </select>
+                    <div style={styles.vocDateBox}>
+                      <input type="date" style={styles.vocDateInput} value={actionStartDate} onChange={(e) => setActionStartDate(e.target.value)} />
+                      <span style={styles.vocDateDivider}>~</span>
+                      <input type="date" style={styles.vocDateInput} value={actionEndDate} onChange={(e) => setActionEndDate(e.target.value)} />
+                    </div>
+                  </div>
+                </div>
+
+                <div style={styles.vocKpiGrid}>
+                  <VocKpiCard label="EV세상 완료" value={`${actionSummary.total.toLocaleString()}건`} hint="T열 완료자소속 기준" color={COLORS.blue} bg={COLORS.blueSoft} />
+                  <VocKpiCard label="단순조치" value={`${actionSummary.simple.toLocaleString()}건`} hint={`${percentOf(actionSummary.simple, actionSummary.total)}%`} color={COLORS.green} bg={COLORS.greenSoft} />
+                  <VocKpiCard label="부품사용" value={`${actionSummary.part.toLocaleString()}건`} hint={`${percentOf(actionSummary.part, actionSummary.total)}%`} color={COLORS.orange} bg={COLORS.orangeSoft} />
+                  <VocKpiCard label="본사이관" value={`${actionSummary.hq.toLocaleString()}건`} hint={`${percentOf(actionSummary.hq, actionSummary.total)}%`} color={COLORS.violet} bg={COLORS.violetSoft} />
+                </div>
+              </div>
+
+              <div style={styles.panel}>
+                <div style={styles.sectionTitleRow}>
+                  <div>
+                    <div style={styles.sectionTitleNoMargin}>모델별 조치 카드</div>
+                    <div style={styles.sectionSubText}>모델별로 단순조치·부품사용·본사이관 비중을 카드로 비교합니다. 카드를 누르면 해당 모델 상세 조치 내역을 바로 확인할 수 있습니다.</div>
+                  </div>
+                  <button style={styles.secondaryButton} onClick={downloadActionStatusExcel}>리스트 엑셀 다운로드</button>
+                </div>
+
+                {actionModelStats.length === 0 ? (
+                  <div style={styles.emptyActionCard}>선택한 기간의 EV세상 완료 조치 데이터가 없습니다.</div>
+                ) : (
+                  <div style={styles.actionModelCardGrid}>
+                    {actionModelStats.map((row) => {
+                      const profile = row.profile || getActionModelProfile(row);
+                      const isSelected = selectedActionModel === row.model;
+                      const topPartsText = row.topParts.length
+                        ? row.topParts.map((item) => `${item.part} ${item.count}건`).join(' / ')
+                        : '부품사용 없음';
+
+                      return (
+                        <div
+                          key={row.model}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setSelectedActionModel((prev) => (prev === row.model ? null : row.model))}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              setSelectedActionModel((prev) => (prev === row.model ? null : row.model));
+                            }
+                          }}
+                          style={{
+                            ...styles.actionModelCard,
+                            borderColor: isSelected ? profile.color : COLORS.border,
+                            boxShadow: isSelected ? `0 18px 42px ${profile.color}22` : COLORS.shadow,
+                          }}
+                        >
+                          <div style={styles.actionModelCardTop}>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={styles.actionModelName} title={row.model}>{row.model}</div>
+                              <div style={styles.actionModelTotal}>총 조치 {row.total.toLocaleString()}건</div>
+                            </div>
+                            <span style={{ ...styles.actionProfileBadge, color: profile.color, background: profile.soft, borderColor: `${profile.color}22` }}>
+                              {profile.label}
+                            </span>
+                          </div>
+
+                          <div style={styles.actionRatioBadgeRow}>
+                            <span style={{ ...styles.actionRatioBadge, color: COLORS.green, background: COLORS.greenSoft }}>단순 {row.simpleRate}%</span>
+                            <span style={{ ...styles.actionRatioBadge, color: COLORS.orange, background: COLORS.orangeSoft }}>부품 {row.partRate}%</span>
+                            <span style={{ ...styles.actionRatioBadge, color: COLORS.violet, background: COLORS.violetSoft }}>이관 {row.hqRate}%</span>
+                          </div>
+
+                          <div style={styles.actionRateStack}>
+                            <ActionRateLine label="단순조치" count={row.simple} total={row.total} color={COLORS.green} />
+                            <ActionRateLine label="부품사용" count={row.part} total={row.total} color={COLORS.orange} />
+                            <ActionRateLine label="본사이관" count={row.hq} total={row.total} color={COLORS.violet} />
+                          </div>
+
+                          <div style={styles.actionPartsBox}>
+                            <div style={styles.actionPartsLabel}>주요 사용 부품 TOP3</div>
+                            <div style={styles.actionPartsText} title={topPartsText}>{topPartsText}</div>
+                          </div>
+
+                          <div style={{ ...styles.actionInsightBox, borderColor: `${profile.color}22`, background: profile.soft }}>
+                            {profile.insight}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {selectedActionModelStat && selectedActionModelInsight && (
+                  <div style={styles.selectedActionPanel}>
+                    <div style={styles.sectionTitleRow}>
+                      <div>
+                        <div style={styles.selectedActionTitle}>{selectedActionModelStat.model} 조치 분석 리포트</div>
+                        <div style={styles.sectionSubText}>
+                          총 {selectedActionModelStat.total.toLocaleString()}건 · 단순조치 {selectedActionModelStat.simple.toLocaleString()}건({selectedActionModelStat.simpleRate}%) / 부품사용 {selectedActionModelStat.part.toLocaleString()}건({selectedActionModelStat.partRate}%) / 본사이관 {selectedActionModelStat.hq.toLocaleString()}건({selectedActionModelStat.hqRate}%)
+                        </div>
+                      </div>
+                      <button style={styles.secondaryButton} onClick={() => setSelectedActionModel(null)}>닫기</button>
+                    </div>
+
+                    <div style={{ ...styles.actionReportDiagnosis, borderColor: `${selectedActionModelInsight.profile.color}22`, background: selectedActionModelInsight.profile.soft }}>
+                      <div style={{ ...styles.actionReportDiagnosisBadge, color: selectedActionModelInsight.profile.color, background: '#fff' }}>{selectedActionModelInsight.profile.label}</div>
+                      <div>
+                        <strong>{selectedActionModelInsight.diagnosis}</strong>
+                        <div style={styles.actionReportDiagnosisSub}>{selectedActionModelInsight.siteInsight}</div>
+                      </div>
+                    </div>
+
+                    <div style={styles.actionReportKpiGrid}>
+                      <VocKpiCard label="단순조치" value={`${selectedActionModelStat.simple.toLocaleString()}건`} hint={`${selectedActionModelStat.simpleRate}% · 현장/원격 복구`} color={COLORS.green} bg={COLORS.greenSoft} />
+                      <VocKpiCard label="부품사용" value={`${selectedActionModelStat.part.toLocaleString()}건`} hint={`${selectedActionModelStat.partRate}% · 자재/부품성`} color={COLORS.orange} bg={COLORS.orangeSoft} />
+                      <VocKpiCard label="본사이관" value={`${selectedActionModelStat.hq.toLocaleString()}건`} hint={`${selectedActionModelStat.hqRate}% · 기술지원`} color={COLORS.violet} bg={COLORS.violetSoft} />
+                    </div>
+
+                    <div style={styles.actionReportGrid}>
+                      <div style={styles.actionReportBox}>
+                        <div style={styles.actionReportBoxTitle}>주요 사용 부품 TOP5</div>
+                        {selectedActionModelInsight.topParts.length === 0 ? (
+                          <div style={styles.actionReportEmpty}>부품사용으로 분류된 내역이 없습니다.</div>
+                        ) : selectedActionModelInsight.topParts.map((item, idx) => (
+                          <div key={item.part} style={styles.actionReportRankRow}>
+                            <div style={styles.actionReportRankLeft}>
+                              <span style={idx === 0 ? styles.rankBadgeTop : styles.rankBadge}>{idx + 1}</span>
+                              <div>
+                                <strong>{item.part}</strong>
+                                <div style={styles.actionReportSubText}>부품사용 {selectedActionModelStat.part.toLocaleString()}건 중 {item.rate}%</div>
+                              </div>
+                            </div>
+                            <strong>{item.count.toLocaleString()}건</strong>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={styles.actionReportBox}>
+                        <div style={styles.actionReportBoxTitle}>반복 발생 충전소 TOP5</div>
+                        {selectedActionModelInsight.topSites.length === 0 ? (
+                          <div style={styles.actionReportEmpty}>충전소 데이터가 없습니다.</div>
+                        ) : selectedActionModelInsight.topSites.map((item, idx) => (
+                          <div key={item.siteName} style={styles.actionReportRankRow}>
+                            <div style={styles.actionReportRankLeft}>
+                              <span style={idx === 0 ? styles.rankBadgeTop : styles.rankBadge}>{idx + 1}</span>
+                              <div>
+                                <strong>{item.siteName}</strong>
+                                <div style={styles.actionReportSubText}>해당 모델 전체 조치 중 {item.rate}%</div>
+                              </div>
+                            </div>
+                            <strong>{item.count.toLocaleString()}건</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div style={styles.actionExampleGrid}>
+                      {['단순조치', '부품사용', '본사이관'].map((type) => (
+                        <div key={type} style={styles.actionExampleBox}>
+                          <div style={styles.actionExampleTitle}>{type} 완료내용 예시</div>
+                          {(selectedActionModelInsight.examples[type] || []).length === 0 ? (
+                            <div style={styles.actionReportEmpty}>예시 없음</div>
+                          ) : selectedActionModelInsight.examples[type].map((content, idx) => (
+                            <div key={`${type}-${idx}`} style={styles.actionExampleItem} title={content}>- {content}</div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={styles.selectedActionMiniHeader}>최근 조치 내역 미리보기</div>
+                    <div style={styles.selectedActionList}>
+                      {selectedActionModelRows.slice(0, 8).map((row) => (
+                        <div key={row.key} style={styles.selectedActionItem}>
+                          <div style={styles.selectedActionItemTop}>
+                            <span style={row.actionType === '단순조치' ? styles.completeBadge : row.actionType === '부품사용' ? styles.pendingBadge : row.actionType === '본사이관' ? styles.orgBadge : styles.rankBadge}>
+                              {row.actionLabel}
+                            </span>
+                            <strong>{row.completedAtText}</strong>
+                          </div>
+                          <div style={styles.selectedActionItemMain}>{row.siteName} · {row.chargerId}</div>
+                          <div style={styles.selectedActionContent} title={row.completedContent}>{row.completedContent}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {selectedActionModelRows.length > 8 && (
+                      <div style={styles.selectedActionMore}>아래 조치 상세 리스트에서 전체 {selectedActionModelRows.length.toLocaleString()}건을 확인할 수 있습니다.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div style={styles.topGrid}>
+                <div style={styles.panel}>
+                  <div style={styles.sectionTitle}>부품별 고장 추정 TOP</div>
+                  {actionPartStats.length === 0 ? (
+                    <div style={{ color: COLORS.sub }}>부품사용으로 분류된 완료내용이 없습니다.</div>
+                  ) : (
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      {actionPartStats.slice(0, 10).map((item, idx) => (
+                        <div key={item.part} style={styles.summaryBox}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                            <strong>{idx + 1}. {item.part}</strong>
+                            <span>{item.count.toLocaleString()}건</span>
+                          </div>
+                          <div style={{ color: COLORS.sub, fontSize: 12, marginTop: 4 }}>
+                            주요 모델: {item.topModels.map((m) => `${m.model} ${m.count}건`).join(' / ') || '-'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div style={styles.panel}>
+                  <div style={styles.sectionTitle}>미분류 완료내용 검토</div>
+                  <div style={{ color: COLORS.sub, fontSize: 13, marginBottom: 10 }}>
+                    미분류가 많으면 키워드만 추가하면 정확도가 올라갑니다. 예: 단순처리, 본사요청, 보드교체 등
+                  </div>
+                  <div style={{ display: 'grid', gap: 8, maxHeight: 360, overflowY: 'auto' }}>
+                    {actionUnknownRows.length === 0 ? (
+                      <div style={{ color: COLORS.sub }}>미분류 완료내용이 없습니다.</div>
+                    ) : actionUnknownRows.map((row) => (
+                      <div key={row.key} style={styles.logItem} title={row.completedContent}>
+                        <strong>{row.model}</strong> · {row.completedAtText}<br />
+                        {row.completedContent.length > 90 ? `${row.completedContent.slice(0, 90)}...` : row.completedContent}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div style={styles.panel}>
+                <div style={styles.sectionTitle}>조치 상세 리스트</div>
+                <div style={styles.tableWrap}>
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th>모델</th>
+                        <th>조치분류</th>
+                        <th>주요부품</th>
+                        <th>충전소명</th>
+                        <th>충전기 ID</th>
+                        <th>완료일시</th>
+                        <th>완료자</th>
+                        <th>완료내용</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {actionStatusRows.slice(0, 500).map((row) => (
+                        <tr key={row.key}>
+                          <td>{row.model}</td>
+                          <td>
+                            <span style={row.actionType === '단순조치' ? styles.completeBadge : row.actionType === '부품사용' ? styles.pendingBadge : row.actionType === '본사이관' ? styles.orgBadge : styles.rankBadge}>
+                              {row.actionLabel}
+                            </span>
+                          </td>
+                          <td>{row.parts?.length ? row.parts.join(', ') : '-'}</td>
+                          <td>{row.siteName}</td>
+                          <td>{row.chargerId}</td>
+                          <td>{row.completedAtText}</td>
+                          <td>{row.completedName}</td>
+                          <td style={styles.compactContentCell} title={row.completedContent}>{row.completedContent}</td>
+                        </tr>
+                      ))}
+                      {actionStatusRows.length === 0 && (
+                        <tr><td colSpan="8" style={{ color: COLORS.sub, textAlign: 'center', padding: 24 }}>표시할 조치 상세 데이터가 없습니다.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                {actionStatusRows.length > 500 && (
+                  <div style={{ color: COLORS.sub, fontSize: 13, marginTop: 8 }}>화면에는 500건까지만 표시됩니다. 전체 데이터는 엑셀 다운로드를 사용해주세요.</div>
                 )}
               </div>
             </div>
@@ -3645,6 +4375,21 @@ function VocKpiCard({ label, value, hint, color, bg }) {
   );
 }
 
+function ActionRateLine({ label, count, total, color }) {
+  const rate = percentOf(count, total);
+  return (
+    <div style={styles.actionRateLine}>
+      <div style={styles.actionRateLabelRow}>
+        <span>{label}</span>
+        <strong>{count.toLocaleString()}건 · {rate}%</strong>
+      </div>
+      <div style={styles.actionRateTrack}>
+        <div style={{ ...styles.actionRateFill, width: `${Math.min(rate, 100)}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
 const styles = {
   page: {
     minHeight: '100vh',
@@ -4327,6 +5072,56 @@ const styles = {
   rateCell: { display: 'grid', gridTemplateColumns: '1fr 52px', gap: 10, alignItems: 'center' },
   rateTrack: { height: 10, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' },
   rateFill: { height: '100%', borderRadius: 999, background: `linear-gradient(90deg, ${COLORS.blue}, ${COLORS.violet})` },
+  actionModelCardGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 16 },
+  actionModelCard: {
+    background: 'linear-gradient(135deg, #ffffff 0%, #fbfdff 58%, #f8fbff 100%)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 22,
+    padding: 18,
+    cursor: 'pointer',
+    outline: 'none',
+    transition: 'transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease',
+  },
+  actionModelCardTop: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 14 },
+  actionModelName: { fontSize: 18, fontWeight: 950, color: COLORS.text, letterSpacing: '-0.03em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  actionModelTotal: { marginTop: 5, color: COLORS.sub, fontSize: 13, fontWeight: 800 },
+  actionProfileBadge: { border: '1px solid transparent', borderRadius: 999, padding: '7px 10px', fontSize: 12, fontWeight: 950, whiteSpace: 'nowrap', flexShrink: 0 },
+  actionRatioBadgeRow: { display: 'flex', gap: 7, flexWrap: 'wrap', marginBottom: 14 },
+  actionRatioBadge: { borderRadius: 999, padding: '6px 9px', fontSize: 12, fontWeight: 950 },
+  actionRateStack: { display: 'grid', gap: 10, marginBottom: 14 },
+  actionRateLine: { display: 'grid', gap: 6 },
+  actionRateLabelRow: { display: 'flex', justifyContent: 'space-between', gap: 10, color: COLORS.slate, fontSize: 12.5, fontWeight: 850 },
+  actionRateTrack: { height: 9, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' },
+  actionRateFill: { height: '100%', borderRadius: 999 },
+  actionPartsBox: { background: '#f8fbff', border: `1px solid ${COLORS.line}`, borderRadius: 16, padding: 12, marginBottom: 12 },
+  actionPartsLabel: { color: COLORS.sub, fontSize: 12, fontWeight: 900, marginBottom: 5 },
+  actionPartsText: { color: COLORS.text, fontSize: 13, fontWeight: 850, lineHeight: 1.45, minHeight: 18 },
+  actionInsightBox: { border: '1px solid transparent', borderRadius: 14, padding: '10px 12px', color: COLORS.slate, fontSize: 12.5, fontWeight: 850, lineHeight: 1.45 },
+  emptyActionCard: { border: `1px dashed ${COLORS.border}`, borderRadius: 18, padding: 24, textAlign: 'center', color: COLORS.sub, background: '#f8fbff', fontWeight: 800 },
+  selectedActionPanel: { marginTop: 18, border: `1px solid ${COLORS.blue}22`, background: 'linear-gradient(135deg, #ffffff 0%, #f8fbff 100%)', borderRadius: 20, padding: 18 },
+  actionReportDiagnosis: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 14, alignItems: 'center', border: '1px solid transparent', borderRadius: 18, padding: 16, marginBottom: 14, color: COLORS.text, lineHeight: 1.5 },
+  actionReportDiagnosisBadge: { borderRadius: 999, padding: '9px 12px', fontSize: 12, fontWeight: 950, whiteSpace: 'nowrap', boxShadow: '0 8px 18px rgba(15,23,42,0.06)' },
+  actionReportDiagnosisSub: { marginTop: 3, color: COLORS.sub, fontSize: 13, fontWeight: 800 },
+  actionReportKpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 14 },
+  actionReportGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 },
+  actionReportBox: { border: `1px solid ${COLORS.line}`, background: '#fff', borderRadius: 18, padding: 15, minHeight: 208 },
+  actionReportBoxTitle: { fontSize: 15, fontWeight: 950, color: COLORS.text, marginBottom: 12, letterSpacing: '-0.02em' },
+  actionReportRankRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: `1px solid ${COLORS.line}` },
+  actionReportRankLeft: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 },
+  actionReportSubText: { color: COLORS.sub, fontSize: 12, marginTop: 2, fontWeight: 800 },
+  actionReportEmpty: { color: COLORS.sub, fontSize: 13, fontWeight: 800, padding: '10px 0' },
+  actionExampleGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 14 },
+  actionExampleBox: { border: `1px solid ${COLORS.line}`, background: '#fff', borderRadius: 16, padding: 13, minHeight: 136 },
+  actionExampleTitle: { fontSize: 13, color: COLORS.slate, fontWeight: 950, marginBottom: 9 },
+  actionExampleItem: { color: COLORS.sub, fontSize: 12.5, lineHeight: 1.45, marginBottom: 6, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' },
+  selectedActionMiniHeader: { fontSize: 14, fontWeight: 950, color: COLORS.text, margin: '4px 0 10px' },
+  selectedActionTitle: { fontSize: 18, fontWeight: 950, letterSpacing: '-0.02em' },
+  selectedActionList: { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 10 },
+  selectedActionItem: { border: `1px solid ${COLORS.line}`, background: '#fff', borderRadius: 16, padding: 13 },
+  selectedActionItemTop: { display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8, fontSize: 12.5, color: COLORS.slate },
+  selectedActionItemMain: { color: COLORS.text, fontSize: 13.5, fontWeight: 900, marginBottom: 6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  selectedActionContent: { color: COLORS.sub, fontSize: 12.5, lineHeight: 1.45, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' },
+  selectedActionMore: { marginTop: 10, color: COLORS.sub, fontSize: 12.5, fontWeight: 800 },
   actionButtonWrap: { display: 'flex', gap: 8, justifyContent: 'center' },
   modalOverlay: {
     position: 'fixed',

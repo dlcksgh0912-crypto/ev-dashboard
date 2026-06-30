@@ -145,6 +145,31 @@ const PART_PATTERNS = {
 };
 
 
+
+
+// 출동 현황 전용: 부품 교체/비교 영역에는 아래 주요 5개만 표시합니다.
+// 고장조치 현황 등 다른 영역의 부품 분류 로직과 분리해서 사용합니다.
+const DISPATCH_MAJOR_PART_NAMES = Object.freeze(['안드로이드 보드', '메인보드', 'LCD', '충전기', '피닉스 케이블']);
+const DISPATCH_MAJOR_PART_PATTERNS = {
+  '안드로이드 보드': /안드로이드[-_\s]*보드/i,
+  '메인보드': /메인[-_\s]*보드/i,
+  LCD: /(?:LCD|엘씨디)[-_\s]*(?:패널|모듈|보드)?/i,
+  충전기: /충전기\s?교체/i,
+  '피닉스 케이블': /피닉스[-_\s]*케이블/i,
+};
+
+function extractDispatchMajorPartsFromContent(value) {
+  const text = normalizeText(value);
+  if (!text) return [];
+
+  const found = DISPATCH_MAJOR_PART_NAMES.filter((name) => {
+    if (name === '충전기') return isValidChargerReplacement(text);
+    return DISPATCH_MAJOR_PART_PATTERNS[name].test(text);
+  });
+
+  return Array.from(new Set(found));
+}
+
 const MODEL_TYPE_MAP = {
   'EVL-1C07027A01': '에버온_구형대',
   'EVL-1C07027A01_미사용': '에버온_구형대',
@@ -767,6 +792,25 @@ function getActionModelProfile(row) {
     soft: COLORS.blueSoft,
     insight: '단순조치·부품사용·이관이 혼합된 일반 패턴',
   };
+}
+
+
+
+function summarizeDispatchPartContent(value, parts = []) {
+  const text = normalizeText(value);
+  if (!text) return '-';
+
+  const headerMatch = text.match(/((?:\d{6}|\d{8})\s+[^\s\[]+)/);
+  const header = headerMatch ? headerMatch[1] : '';
+  const mainParts = parts.length ? parts : extractDispatchMajorPartsFromContent(text);
+
+  const summary = [
+    header ? `📌 ${header}` : '',
+    mainParts.length ? `🔧 ${mainParts.join(', ')}` : '',
+    /교체/i.test(text) ? '✅ 부품 교체' : '',
+  ].filter(Boolean);
+
+  return summary.length > 0 ? summary.join('\n') : '-';
 }
 
 function summarizeAfterContent(value) {
@@ -2396,7 +2440,7 @@ export default function Dashboard() {
     return vocDateFilteredRows
       .filter((v) => v.completedContent.includes('부품교체'))
       .map((v) => {
-        const detectedParts = extractPartNamesFromContent(v.completedContent);
+        const detectedParts = extractDispatchMajorPartsFromContent(v.completedContent);
 
         if (detectedParts.length === 0) return null;
 
@@ -2406,7 +2450,7 @@ export default function Dashboard() {
           siteName: v.siteName || '-',
           completedAtText: v.completedAt ? formatDate(v.completedAt) : '-',
           usedParts: detectedParts.join(', '),
-          summaryContent: summarizeAfterContent(v.completedContent),
+          summaryContent: summarizeDispatchPartContent(v.completedContent, detectedParts),
           fullContent: v.completedContent,
         };
       })
@@ -2415,7 +2459,7 @@ export default function Dashboard() {
 
   const partUsageSummary = useMemo(() => {
     const counts = {};
-    Object.keys(PART_PATTERNS).forEach((name) => {
+    DISPATCH_MAJOR_PART_NAMES.forEach((name) => {
       counts[name] = 0;
     });
 
@@ -2467,7 +2511,7 @@ export default function Dashboard() {
 
     const currentCounts = {};
     const compareCounts = {};
-    Object.keys(PART_PATTERNS).forEach((name) => {
+    DISPATCH_MAJOR_PART_NAMES.forEach((name) => {
       currentCounts[name] = 0;
       compareCounts[name] = 0;
     });
@@ -2483,12 +2527,12 @@ export default function Dashboard() {
       if (v.completedAt < vocPartCompareRange.start || v.completedAt > vocPartCompareRange.end) return;
       if (!v.completedContent.includes('부품교체')) return;
 
-      extractPartNamesFromContent(v.completedContent).forEach((part) => {
+      extractDispatchMajorPartsFromContent(v.completedContent).forEach((part) => {
         compareCounts[part] = (compareCounts[part] || 0) + 1;
       });
     });
 
-    return Object.keys(PART_PATTERNS)
+    return DISPATCH_MAJOR_PART_NAMES
       .map((part) => {
         const current = currentCounts[part] || 0;
         const compare = compareCounts[part] || 0;
@@ -3262,8 +3306,8 @@ export default function Dashboard() {
               <div style={styles.panel}>
                 <div style={styles.sectionTitleRow}>
                   <div>
-                    <div style={styles.sectionTitleNoMargin}>부품 사용 비교 요약</div>
-                    <div style={styles.sectionSubText}>선택기간 사용량과 비교기간 사용량을 부품별로 비교합니다.</div>
+                    <div style={styles.sectionTitleNoMargin}>주요 5개 부품 사용 비교 요약</div>
+                    <div style={styles.sectionSubText}>출동 현황은 주요 5개 부품만 비교합니다. (안드로이드 보드·메인보드·LCD·충전기·피닉스 케이블)</div>
                   </div>
                 </div>
                 {vocPartComparisonStats.length === 0 ? (
@@ -3286,7 +3330,7 @@ export default function Dashboard() {
 
               <div style={styles.panel}>
                 <div style={styles.sectionTitleRow}>
-                  <div style={styles.sectionTitleNoMargin}>부품 교체 내역</div>
+                  <div style={styles.sectionTitleNoMargin}>주요 5개 부품 교체 내역</div>
                   <button style={styles.secondaryButton} onClick={downloadVocPartsExcel}>
                     리스트 엑셀 다운로드
                   </button>

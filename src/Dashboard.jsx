@@ -121,11 +121,27 @@ const COLORS = {
 };
 
 const PART_PATTERNS = {
-  '안드로이드 보드': /안드로이드[-_\s]?보드/i,
-  '메인보드': /메인[-_\s]?보드/i,
-  LCD: /LCD/i,
+  '안드로이드 보드': /안드로이드[-_\s]*보드/i,
+  '메인보드': /메인[-_\s]*보드/i,
+  LCD: /(?:LCD|엘씨디|디스플레이|화면)[-_\s]*(?:패널|모듈|보드)?/i,
   충전기: /충전기\s?교체/i,
-  '피닉스 케이블': /피닉스[-_\s]?케이블/i,
+  '피닉스 케이블': /피닉스[-_\s]*케이블/i,
+  'PLC 모뎀': /PLC[-_\s]*(?:모뎀|통신[-_\s]*모듈|모듈)/i,
+  '통신 모뎀': /(?:LTE|4G|통신)[-_\s]*모뎀/i,
+  '통신 모듈': /통신[-_\s]*(?:모듈|보드)/i,
+  '파워 모듈': /파워[-_\s]*모듈/i,
+  SMPS: /SMPS/i,
+  RCD: /RCD|누전[-_\s]*(?:감지|차단)/i,
+  릴레이: /릴레이|RELAY/i,
+  차단기: /차단기|MCCB|ELB/i,
+  커넥터: /(?:커넥터|컨넥터|충전[-_\s]*건|충전[-_\s]*커넥터)/i,
+  '충전 케이블': /충전[-_\s]*케이블/i,
+  '랜 케이블': /(?:LAN|랜)[-_\s]*케이블/i,
+  전력량계: /전력량계|계량기|미터기/i,
+  'RFID 리더기': /RFID[-_\s]*(?:리더기|리더|보드|모듈)|카드[-_\s]*(?:리더기|리더)/i,
+  '비상 스위치': /비상[-_\s]*(?:스위치|버튼)/i,
+  '쿨링 팬': /(?:쿨링[-_\s]*)?팬|FAN/i,
+  '터치 패널': /터치[-_\s]*(?:패널|스크린)/i,
 };
 
 
@@ -568,16 +584,55 @@ function getRegionGroup(value) {
   return '지역 미기재';
 }
 
+
+function normalizePartName(value) {
+  const text = normalizeText(value)
+    .replace(/[\[\]{}()]/g, ' ')
+    .replace(/["'`]/g, '')
+    .replace(/[·ㆍ.,:;|/\\_\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return '';
+
+  const compact = normalizeActionKeyword(text);
+
+  if (/안드로이드보드/i.test(compact)) return '안드로이드 보드';
+  if (/메인보드/i.test(compact)) return '메인보드';
+  if (/lcd|엘씨디|디스플레이|화면패널|화면모듈/i.test(compact)) return 'LCD';
+  if (/피닉스케이블/i.test(compact)) return '피닉스 케이블';
+  if (/충전기교체|충전기/i.test(compact)) return '충전기';
+  if (/plc모뎀|plc통신모듈|plc모듈/i.test(compact)) return 'PLC 모뎀';
+  if (/lte모뎀|4g모뎀|통신모뎀|^모뎀$/i.test(compact)) return '통신 모뎀';
+  if (/통신모듈|통신보드/i.test(compact)) return '통신 모듈';
+  if (/파워모듈/i.test(compact)) return '파워 모듈';
+  if (/smps/i.test(compact)) return 'SMPS';
+  if (/rcd|누전감지|누전차단/i.test(compact)) return 'RCD';
+  if (/릴레이|relay/i.test(compact)) return '릴레이';
+  if (/차단기|mccb|elb/i.test(compact)) return '차단기';
+  if (/커넥터|컨넥터|충전건|충전커넥터/i.test(compact)) return '커넥터';
+  if (/충전케이블/i.test(compact)) return '충전 케이블';
+  if (/lan케이블|랜케이블/i.test(compact)) return '랜 케이블';
+  if (/전력량계|계량기|미터기/i.test(compact)) return '전력량계';
+  if (/rfid리더기|rfid리더|rfid보드|rfid모듈|카드리더기|카드리더/i.test(compact)) return 'RFID 리더기';
+  if (/비상스위치|비상버튼/i.test(compact)) return '비상 스위치';
+  if (/쿨링팬|^팬$|fan/i.test(compact)) return '쿨링 팬';
+  if (/터치패널|터치스크린/i.test(compact)) return '터치 패널';
+
+  return text.length > 24 ? `${text.slice(0, 24)}...` : text;
+}
+
 function extractPartNamesFromContent(value) {
   const text = normalizeText(value);
   if (!text) return [];
 
-  return Object.entries(PART_PATTERNS)
+  const parts = Object.entries(PART_PATTERNS)
     .filter(([name, regex]) => {
       if (name === '충전기') return isValidChargerReplacement(text);
       return regex.test(text);
     })
-    .map(([name]) => name);
+    .map(([name]) => normalizePartName(name));
+
+  return Array.from(new Set(parts.filter(Boolean)));
 }
 
 
@@ -608,14 +663,14 @@ function classifyCompletedAction(value) {
   // 완료내용이 "단순조치_차단기트립", "단순 처리 / 전원 리셋"처럼 적힌 경우가 많아서
   // 단순 계열 키워드는 부품 키워드보다 먼저 판단합니다.
   const isSimpleAction = /단순(조치|처리|완료|복구)|현장(조치|처리|복구|완료)|원격(조치|처리|복구|완료)|전원(리셋|재부팅|온오프|투입|복구)|차단기(트립|복구|리셋|올림|투입)|정상(확인|충전|동작|처리|복구)|조치완료|처리완료|복구완료|재부팅|리셋|초기화|커넥터재삽입|통신복구|상태복구|어플(재시작|재실행)|앱(재시작|재실행)/i.test(compact);
-  const hasExplicitPartPrefix = /(부품|자재)(사용|교체|투입|장착|교환)|^(보드|메인보드|안드로이드보드|lcd|케이블|커넥터|모뎀|통신모듈|파워모듈|릴레이|rcd).*(교체|사용|투입|장착|교환)/i.test(compact);
+  const hasExplicitPartPrefix = /(부품|자재)(사용|교체|투입|장착|교환)|^(보드|메인보드|안드로이드보드|lcd|엘씨디|케이블|커넥터|컨넥터|모뎀|통신모듈|통신보드|파워모듈|smps|릴레이|rcd|차단기|전력량계|계량기|미터기|rfid|비상스위치|비상버튼|팬|터치패널).*(교체|사용|투입|장착|교환)/i.test(compact);
 
   if (isSimpleAction && !hasExplicitPartPrefix) {
     return { type: '단순조치', label: '단순조치' };
   }
 
   const detectedParts = extractPartNamesFromContent(original);
-  const hasPartKeyword = /(부품|자재|보드|케이블|커넥터|lcd|안드로이드|메인보드|모뎀|통신모듈|파워모듈|릴레이|rcd)/i.test(compact);
+  const hasPartKeyword = /(부품|자재|보드|케이블|커넥터|컨넥터|lcd|엘씨디|디스플레이|안드로이드|메인보드|모뎀|통신모듈|통신보드|파워모듈|smps|릴레이|rcd|차단기|전력량계|계량기|미터기|rfid|비상스위치|비상버튼|팬|터치패널)/i.test(compact);
   const hasUseOrReplace = /(교체|사용|투입|장착|교환|설치)/i.test(compact);
   if (detectedParts.length > 0 || /부품(사용|교체|투입)|자재(사용|교체|투입)/i.test(compact) || (hasPartKeyword && hasUseOrReplace)) {
     return { type: '부품사용', label: '부품사용' };
@@ -644,12 +699,13 @@ function extractActionPartNames(value) {
   patterns.forEach((regex) => {
     let match;
     while ((match = regex.exec(normalized)) !== null) {
-      const part = normalizeText(match[1])
-        .replace(/^(부품|자재|단순|본사|제조사)\s*/i, '')
-        .replace(/(후|및|완료|진행|처리)$/i, '')
-        .trim();
+      const part = normalizePartName(
+        normalizeText(match[1])
+          .replace(/^(부품|자재|단순|본사|제조사)\s*/i, '')
+          .replace(/(후|및|완료|진행|처리)$/i, '')
+      );
       if (part && part.length >= 2 && !/^(조치|처리|확인|정상|현장|원격)$/.test(part)) {
-        found.add(part.length > 24 ? `${part.slice(0, 24)}...` : part);
+        found.add(part);
       }
     }
   });

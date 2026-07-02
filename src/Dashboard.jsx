@@ -408,6 +408,28 @@ function toNumber(value) {
 // 정렬 기준은 반드시 이 S열의 누적충전량을 우선으로 사용합니다.
 const VOC_CUMULATIVE_CHARGE_INDEX = 18;
 
+// VOC접수건 엑셀 고정 열 기준
+// A=0 기준: B 접수일시, P 진행담당자, Q 진행담당자 소속, R 완료일시, T 완료자 소속
+const VOC_RECEIVED_AT_INDEX = 1;
+const VOC_PROGRESS_NAME_INDEX = 15;
+const VOC_PROGRESS_ORG_INDEX = 16;
+const VOC_COMPLETED_AT_INDEX = 17;
+const VOC_COMPLETED_ORG_INDEX = 19;
+
+function compactText(value) {
+  return normalizeText(value).replace(/\s+/g, '');
+}
+
+function isAssigningStatus(value) {
+  const text = compactText(value);
+  return text === '배정중' || text.includes('배정중');
+}
+
+function isEvWorldText(value) {
+  const text = compactText(value);
+  return text.includes('EV세상');
+}
+
 function parseLooseNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -544,6 +566,224 @@ function getRecentWeekDateRange() {
     start: formatDateInputValue(start),
     end: formatDateInputValue(end),
   };
+}
+
+// ── 기간별 VOC 처리 현황(대시보드 하단) 계산용 유틸 ─────────────────────────
+// 기본은 오늘 기준 최근 7일이며, 선택 기간과 바로 이전 동일 기간을 비교합니다.
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function startOfDay(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfDay(date) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function getTrendDateRange(startDateText, endDateText) {
+  const fallback = getRecentWeekDateRange();
+  const startText = startDateText || fallback.start;
+  const endText = endDateText || fallback.end;
+
+  let start = new Date(`${startText}T00:00:00`);
+  let end = new Date(`${endText}T23:59:59`);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    start = new Date(`${fallback.start}T00:00:00`);
+    end = new Date(`${fallback.end}T23:59:59`);
+  }
+
+  if (start > end) {
+    const temp = start;
+    start = startOfDay(end);
+    end = endOfDay(temp);
+  }
+
+  return { start: startOfDay(start), end: endOfDay(end) };
+}
+
+function getInclusiveDayCount(start, end) {
+  if (!start || !end) return 7;
+  const startDay = startOfDay(start);
+  const endDay = startOfDay(end);
+  return Math.max(1, Math.round((endDay - startDay) / (24 * 60 * 60 * 1000)) + 1);
+}
+
+function getPreviousSamePeriod(start, end) {
+  const days = getInclusiveDayCount(start, end);
+  const previousEnd = endOfDay(addDays(start, -1));
+  const previousStart = startOfDay(addDays(previousEnd, -(days - 1)));
+  return { start: previousStart, end: previousEnd };
+}
+
+function formatTrendDayLabel(date) {
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${m}/${d}`;
+}
+
+function formatTrendRangeLabel(start, end) {
+  if (!start || !end) return '-';
+  return `${formatDateInputValue(start)} ~ ${formatDateInputValue(end)}`;
+}
+
+function getDailyBuckets(start, end) {
+  const buckets = [];
+  const cursor = startOfDay(start);
+  const last = startOfDay(end);
+
+  while (cursor <= last) {
+    const bucketStart = startOfDay(cursor);
+    const bucketEnd = endOfDay(cursor);
+    buckets.push({ start: bucketStart, end: bucketEnd, label: formatTrendDayLabel(cursor) });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return buckets;
+}
+
+function findDateBucketIndex(buckets, date) {
+  if (!date) return -1;
+  return buckets.findIndex((b) => date >= b.start && date <= b.end);
+}
+
+// 기간별 VOC 처리 현황 기준
+// 접수: B열 접수일시 + Q열 진행 담당자 소속 = 'EV세상'
+// 완료: R열 완료일시 + T열 완료자 소속 = 'EV세상'
+// SLA: EV세상 완료건 중 B열 접수일시~R열 완료일시 주말 제외 48시간 이내
+function isEvWorldVocReceived(row) {
+  if (!row) return false;
+  return isEvWorldText(row.progressOrgFixed) || isEvWorldText(row.progressOrg);
+}
+
+function isEvWorldVocCompleted(row) {
+  if (!row) return false;
+  return isEvWorldText(row.completedOrgFixed) || isEvWorldText(row.completedOrg);
+}
+
+function getVocReceivedAt(row) {
+  return row?.receivedAtFixed || row?.receivedAt || null;
+}
+
+function getVocCompletedAt(row) {
+  return row?.completedAtFixed || row?.completedAt || null;
+}
+
+function summarizeVocTrendPeriod(vocRows, start, end) {
+  const summary = { received: 0, completed: 0, completionRate: null, within48: 0, after48: 0, slaRate: null };
+
+  vocRows.forEach((row) => {
+    const receivedAt = getVocReceivedAt(row);
+    const completedAt = getVocCompletedAt(row);
+
+    if (isEvWorldVocReceived(row) && receivedAt && receivedAt >= start && receivedAt <= end) {
+      summary.received += 1;
+    }
+
+    if (isEvWorldVocCompleted(row) && completedAt && completedAt >= start && completedAt <= end) {
+      summary.completed += 1;
+      const withinSla = isWithinSla48(receivedAt, completedAt);
+      if (withinSla === true) summary.within48 += 1;
+      else if (withinSla === false) summary.after48 += 1;
+    }
+  });
+
+  summary.completionRate = summary.received > 0 ? Math.round((summary.completed / summary.received) * 1000) / 10 : null;
+
+  const denominator = summary.within48 + summary.after48;
+  summary.slaRate = denominator > 0 ? Math.round((summary.within48 / denominator) * 1000) / 10 : null;
+  return summary;
+}
+
+// 선택한 기간을 일자별로 나누어 VOC 접수/완료/SLA 추이를 계산합니다.
+function getVocTrendByDateRange(vocRows, startDateText, endDateText) {
+  const range = getTrendDateRange(startDateText, endDateText);
+  const previousRange = getPreviousSamePeriod(range.start, range.end);
+  const buckets = getDailyBuckets(range.start, range.end);
+  const daily = buckets.map((b) => ({ ...b, received: 0, completed: 0, within48: 0, after48: 0, slaRate: null }));
+
+  vocRows.forEach((row) => {
+    const receivedAt = getVocReceivedAt(row);
+    const completedAt = getVocCompletedAt(row);
+
+    if (isEvWorldVocReceived(row) && receivedAt) {
+      const receivedIdx = findDateBucketIndex(buckets, receivedAt);
+      if (receivedIdx >= 0) daily[receivedIdx].received += 1;
+    }
+
+    if (isEvWorldVocCompleted(row) && completedAt) {
+      const completedIdx = findDateBucketIndex(buckets, completedAt);
+      if (completedIdx >= 0) {
+        daily[completedIdx].completed += 1;
+        const withinSla = isWithinSla48(receivedAt, completedAt);
+        if (withinSla === true) daily[completedIdx].within48 += 1;
+        else if (withinSla === false) daily[completedIdx].after48 += 1;
+      }
+    }
+  });
+
+  const data = daily.map((row) => {
+    const denominator = row.within48 + row.after48;
+    const slaRate = denominator > 0 ? Math.round((row.within48 / denominator) * 1000) / 10 : null;
+    return { ...row, slaRate };
+  });
+
+  return {
+    data,
+    current: summarizeVocTrendPeriod(vocRows, range.start, range.end),
+    previous: summarizeVocTrendPeriod(vocRows, previousRange.start, previousRange.end),
+    range,
+    previousRange,
+    rangeLabel: formatTrendRangeLabel(range.start, range.end),
+    previousRangeLabel: formatTrendRangeLabel(previousRange.start, previousRange.end),
+  };
+}
+
+
+function getVocEvWorldLogCounts(vocRows) {
+  const counts = {
+    bDate: 0,
+    pAssigning: 0,
+    qEvWorld: 0,
+    pqReceived: 0,
+    headerReceived: 0,
+    rowScanReceived: 0,
+    finalReceived: 0,
+    rDate: 0,
+    tEvWorld: 0,
+    rtCompleted: 0,
+  };
+
+  vocRows.forEach((row) => {
+    const receivedAt = getVocReceivedAt(row);
+    const completedAt = getVocCompletedAt(row);
+    const pAssigning = isAssigningStatus(row?.progressNameFixed);
+    const qEvWorld = isEvWorldText(row?.progressOrgFixed);
+    const headerReceived = isAssigningStatus(row?.progressName) && isEvWorldText(row?.progressOrg);
+    const rowScanReceived = row?.hasAssigningStatusInRow && row?.hasEvWorldTextInRow;
+    const tEvWorld = isEvWorldText(row?.completedOrgFixed) || isEvWorldText(row?.completedOrg);
+
+    if (receivedAt) counts.bDate += 1;
+    if (pAssigning) counts.pAssigning += 1;
+    if (qEvWorld) counts.qEvWorld += 1;
+    if (receivedAt && pAssigning && qEvWorld) counts.pqReceived += 1;
+    if (receivedAt && headerReceived) counts.headerReceived += 1;
+    if (receivedAt && rowScanReceived) counts.rowScanReceived += 1;
+    if (receivedAt && isEvWorldVocReceived(row)) counts.finalReceived += 1;
+    if (completedAt) counts.rDate += 1;
+    if (tEvWorld) counts.tEvWorld += 1;
+    if (completedAt && tEvWorld) counts.rtCompleted += 1;
+  });
+
+  return counts;
 }
 
 function formatShortDate(date) {
@@ -865,10 +1105,22 @@ function extractCutoffFromFilename(fileName) {
 function workbookToRows(workbook) {
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
+
+  // SheetJS는 기본적으로 시트의 !ref 시작 위치부터 배열을 만들 수 있습니다.
+  // VOC 파일에서 A열이 비어 있거나 숨김/서식 상태이면 row[0]이 실제 A열이 아니라 B열부터 시작해
+  // P/Q/T 고정 열 기준이 한 칸씩 밀릴 수 있어, 반드시 A1부터 읽도록 고정합니다.
+  const ref = sheet['!ref'];
+  const range = ref ? XLSX.utils.decode_range(ref) : null;
+  if (range) {
+    range.s.r = 0;
+    range.s.c = 0;
+  }
+
   return XLSX.utils.sheet_to_json(sheet, {
     header: 1,
     raw: false,
     defval: '',
+    ...(range ? { range } : {}),
   });
 }
 
@@ -982,11 +1234,11 @@ function mapVocColumns(headerRow) {
   return {
     matchId: withFallback(['충전기ID', '충전기 ID', '충전기번호', '충전기 번호', '매칭ID', 'matchId'], 13),
     siteName: withFallback(['충전소명', '현장명', '사이트명'], 14),
-    progressName: withFallback(['진행 담당자', '진행담당자', '담당자명'], 15),
-    progressOrg: withFallback(['진행 담당자 소속', '진행담당자 소속', '진행 소속'], 16),
-    completedAt: withFallback(['완료일시', '완료 일시'], 17),
+    progressName: withFallback(['진행 담당자', '진행담당자'], VOC_PROGRESS_NAME_INDEX),
+    progressOrg: withFallback(['진행 담당자 소속', '진행담당자 소속', '진행 소속'], VOC_PROGRESS_ORG_INDEX),
+    completedAt: withFallback(['완료일시', '완료 일시'], VOC_COMPLETED_AT_INDEX),
     completedName: withFallback(['완료자명', '완료자 명', '완료 담당자'], 18),
-    completedOrg: withFallback(['완료자 소속', '완료 소속'], 19),
+    completedOrg: withFallback(['완료자 소속', '완료 소속'], VOC_COMPLETED_ORG_INDEX),
     completedContent: withFallback(['완료내용', '완료 내용', '조치내용', '조치 내용'], 20),
     receivedAt: findHeaderIndex(headers, ['접수일', '접수일시']),
     cumulativeCharge: findHeaderIndex(headers, ['누적충전량', '누적 충전량', '누적 충전량(kWh)', '누적충전', '충전량']),
@@ -996,7 +1248,7 @@ function mapVocColumns(headerRow) {
 function parseVocFile(rows) {
   const headerRow = rows[0] || [];
   const col = mapVocColumns(headerRow);
-  if (col.receivedAt < 0) col.receivedAt = 1; // VOC B열 접수일시 fallback
+  if (col.receivedAt < 0) col.receivedAt = VOC_RECEIVED_AT_INDEX; // VOC B열 접수일시 fallback
   if (col.cumulativeCharge < 0) col.cumulativeCharge = VOC_CUMULATIVE_CHARGE_INDEX; // VOC S열 누적충전량 fallback
 
   return rows
@@ -1008,9 +1260,19 @@ function parseVocFile(rows) {
       const completedOrg = normalizeText(row[col.completedOrg]);
       const progressName = normalizeText(row[col.progressName]);
       const progressOrg = normalizeText(row[col.progressOrg]);
+
+      // 주간 트렌드/EV세상 인입 기준은 사용자가 지정한 실제 열 위치를 우선합니다.
+      const progressNameFixed = normalizeText(row[VOC_PROGRESS_NAME_INDEX]);
+      const progressOrgFixed = normalizeText(row[VOC_PROGRESS_ORG_INDEX]);
+      const completedOrgFixed = normalizeText(row[VOC_COMPLETED_ORG_INDEX]);
+      const receivedAtFixed = parseDateValue(row[VOC_RECEIVED_AT_INDEX]);
+      const completedAtFixed = parseDateValue(row[VOC_COMPLETED_AT_INDEX]);
+      const hasAssigningStatusInRow = row.some((cell) => isAssigningStatus(cell));
+      const hasEvWorldTextInRow = row.some((cell) => isEvWorldText(cell));
+
       const completedContent = normalizeText(row[col.completedContent]);
-      const completedAt = parseDateValue(row[col.completedAt]);
-      const receivedAt = col.receivedAt >= 0 ? parseDateValue(row[col.receivedAt]) : null;
+      const completedAt = completedAtFixed || parseDateValue(row[col.completedAt]);
+      const receivedAt = receivedAtFixed || (col.receivedAt >= 0 ? parseDateValue(row[col.receivedAt]) : null);
       const cumulativeCharge = getVocCumulativeCharge(row, col.cumulativeCharge);
 
       const isCompleted = !!completedName && !!completedOrg;
@@ -1038,6 +1300,13 @@ function parseVocFile(rows) {
         completedOrg,
         progressName,
         progressOrg,
+        progressNameFixed,
+        progressOrgFixed,
+        completedOrgFixed,
+        receivedAtFixed,
+        completedAtFixed,
+        hasAssigningStatusInRow,
+        hasEvWorldTextInRow,
         pendingDisplayOrg,
         pendingDisplayName,
         completedContent,
@@ -1625,6 +1894,151 @@ function DonutChart({ dashboard }) {
   );
 }
 
+function TrendDelta({ current, previous, unit = '', reverse = false }) {
+  if (previous === null || previous === undefined) {
+    return <span style={{ ...styles.trendDelta, color: COLORS.sub }}>비교 데이터 없음</span>;
+  }
+  const diff = Math.round((current - previous) * 10) / 10;
+  if (diff === 0) {
+    return <span style={{ ...styles.trendDelta, color: COLORS.sub }}>직전기간과 동일</span>;
+  }
+  const isUp = diff > 0;
+  const isGood = reverse ? !isUp : isUp;
+  const color = isGood ? COLORS.green : COLORS.red;
+  const arrow = isUp ? '▲' : '▼';
+  return (
+    <span style={{ ...styles.trendDelta, color }}>
+      {arrow} 직전기간 대비 {isUp ? '+' : ''}{diff}{unit}
+    </span>
+  );
+}
+
+function WeeklyVocBarChart({ data }) {
+  const maxValue = Math.max(1, ...data.map((d) => Math.max(d.received, d.completed)));
+  return (
+    <div>
+      <div style={styles.trendLegendRow}>
+        <span style={styles.trendLegendItem}><span style={{ ...styles.trendLegendDot, background: COLORS.blue }} />VOC 접수</span>
+        <span style={styles.trendLegendItem}><span style={{ ...styles.trendLegendDot, background: COLORS.green }} />VOC 완료</span>
+      </div>
+      <div style={styles.trendBarChartWrap}>
+        {data.map((d) => (
+          <div key={d.label} style={styles.trendBarGroup}>
+            <div style={styles.trendBarPair}>
+              <div style={styles.trendBarColumn} title={`접수 ${d.received}건`}>
+                <div style={{ ...styles.trendBar, height: `${(d.received / maxValue) * 100}%`, background: COLORS.blue }} />
+              </div>
+              <div style={styles.trendBarColumn} title={`완료 ${d.completed}건`}>
+                <div style={{ ...styles.trendBar, height: `${(d.completed / maxValue) * 100}%`, background: COLORS.green }} />
+              </div>
+            </div>
+            <div style={styles.trendBarLabel}>{d.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WeeklySlaLineChart({ data }) {
+  const width = 640;
+  const height = 170;
+  const padding = { top: 12, right: 12, bottom: 26, left: 30 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+
+  const points = data.map((d, i) => {
+    const x = padding.left + (chartWidth / Math.max(data.length - 1, 1)) * i;
+    const value = d.slaRate ?? 0;
+    const y = padding.top + chartHeight - (chartHeight * value) / 100;
+    return { x, y, value: d.slaRate, label: d.label };
+  });
+
+  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+      {[0, 25, 50, 75, 100].map((tick) => {
+        const y = padding.top + chartHeight - (chartHeight * tick) / 100;
+        return (
+          <g key={tick}>
+            <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} stroke={COLORS.line} strokeWidth={1} />
+            <text x={0} y={y + 4} fontSize={10} fill={COLORS.sub}>{tick}%</text>
+          </g>
+        );
+      })}
+      {points.length > 0 && <path d={pathD} fill="none" stroke={COLORS.violet} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" />}
+      {points.map((p, i) => (
+        <g key={i}>
+          <circle cx={p.x} cy={p.y} r={4} fill="#fff" stroke={COLORS.violet} strokeWidth={2} />
+          <text x={p.x} y={height - 8} fontSize={10} fill={COLORS.sub} textAnchor="middle">{p.label}</text>
+          {p.value !== null && (
+            <text x={p.x} y={p.y - 10} fontSize={10} fill={COLORS.violet} fontWeight={700} textAnchor="middle">{p.value}%</text>
+          )}
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function WeeklyTrendSection({ vocTrend, trendStartDate, trendEndDate, onTrendStartDateChange, onTrendEndDateChange }) {
+  const trendData = vocTrend?.data || [];
+  const current = vocTrend?.current || { received: 0, completed: 0, completionRate: null, slaRate: null };
+  const previous = vocTrend?.previous || null;
+
+  return (
+    <div style={{ ...styles.panel, marginBottom: 18 }}>
+      <div style={styles.sectionTitleRow}>
+        <div>
+          <div style={styles.sectionTitleNoMargin}>기간별 VOC 처리 현황 <span style={styles.fixedOrgBadge}>EV세상 기준</span></div>
+          <div style={styles.trendRangeHint}>
+            선택기간: {vocTrend?.rangeLabel || '-'} / 비교기간: {vocTrend?.previousRangeLabel || '-'}
+          </div>
+        </div>
+        <div style={styles.vocDateBox}>
+          <input type="date" style={styles.vocDateInput} value={trendStartDate} onChange={(e) => onTrendStartDateChange(e.target.value)} />
+          <span style={styles.vocDateDivider}>~</span>
+          <input type="date" style={styles.vocDateInput} value={trendEndDate} onChange={(e) => onTrendEndDateChange(e.target.value)} />
+        </div>
+      </div>
+
+      <div style={{ ...styles.vocKpiGrid, gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', marginBottom: 22 }}>
+        <div style={styles.trendMiniCard}>
+          <div style={styles.vocKpiLabel}>VOC 접수</div>
+          <div style={{ ...styles.vocKpiValue, color: COLORS.blue }}>{current.received.toLocaleString()}건</div>
+          <TrendDelta current={current.received} previous={previous ? previous.received : null} unit="건" />
+        </div>
+        <div style={styles.trendMiniCard}>
+          <div style={styles.vocKpiLabel}>VOC 완료</div>
+          <div style={{ ...styles.vocKpiValue, color: COLORS.green }}>{current.completed.toLocaleString()}건</div>
+          <TrendDelta current={current.completed} previous={previous ? previous.completed : null} unit="건" />
+        </div>
+        <div style={styles.trendMiniCard}>
+          <div style={styles.vocKpiLabel}>완료율</div>
+          <div style={{ ...styles.vocKpiValue, color: COLORS.orange }}>{current.completionRate === null ? '-' : `${current.completionRate}%`}</div>
+          <TrendDelta current={current.completionRate ?? 0} previous={previous && previous.completionRate !== null ? previous.completionRate : null} unit="%p" />
+        </div>
+        <div style={styles.trendMiniCard}>
+          <div style={styles.vocKpiLabel}>SLA 준수율</div>
+          <div style={{ ...styles.vocKpiValue, color: COLORS.violet }}>{current.slaRate === null ? '-' : `${current.slaRate}%`}</div>
+          <TrendDelta current={current.slaRate ?? 0} previous={previous && previous.slaRate !== null ? previous.slaRate : null} unit="%p" />
+        </div>
+      </div>
+
+      <div style={styles.trendChartGrid}>
+        <div>
+          <div style={styles.trendChartTitle}>일자별 VOC 접수/완료 현황 · EV세상 기준</div>
+          <WeeklyVocBarChart data={trendData} />
+        </div>
+        <div>
+          <div style={styles.trendChartTitle}>일자별 SLA(48시간) 준수율 추이 · EV세상 완료 기준</div>
+          <WeeklySlaLineChart data={trendData} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SideNavItem({ active, icon, label, onClick }) {
   return (
     <button onClick={onClick} style={active ? styles.sideNavActive : styles.sideNavItem}>
@@ -1653,6 +2067,8 @@ export default function Dashboard() {
   const [longPendingFilter, setLongPendingFilter] = useState('all');
   const [sortFilter, setSortFilter] = useState('default');
   const [orgFilter, setOrgFilter] = useState('EV세상');
+  const [trendStartDate, setTrendStartDate] = useState(() => getRecentWeekDateRange().start);
+  const [trendEndDate, setTrendEndDate] = useState(() => getRecentWeekDateRange().end);
   const [vocPartStartDate, setVocPartStartDate] = useState(() => getRecentWeekDateRange().start);
   const [vocPartEndDate, setVocPartEndDate] = useState(() => getRecentWeekDateRange().end);
   const [vocPartCompareMode, setVocPartCompareMode] = useState('samePeriod');
@@ -1902,8 +2318,10 @@ export default function Dashboard() {
             setRawState(parseRawFile({ name: savedFile.original_name }, rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
           } else if (restoredType === 'voc') {
-            setVocRows(parseVocFile(rows));
-            pushLog(`자동 복원 완료: ${savedFile.original_name}`);
+            const parsedVocRows = parseVocFile(rows);
+            setVocRows(parsedVocRows);
+            const debug = getVocEvWorldLogCounts(parsedVocRows);
+            pushLog(`자동 복원 완료: ${savedFile.original_name} · EV세상 접수 ${debug.finalReceived}건 / 완료 ${debug.rtCompleted}건`);
           } else if (restoredType === 'replacement') {
             setReplacementSet(parseReplacementFile(rows));
             pushLog(`자동 복원 완료: ${savedFile.original_name}`);
@@ -1949,8 +2367,10 @@ export default function Dashboard() {
           setReplacementSet(parseReplacementFile(rows));
           pushLog(`교체 예정 반영: ${file.name}`);
         } else if (detectedType === 'voc') {
-          setVocRows(parseVocFile(rows));
-          pushLog(`VOC 파일 반영: ${file.name}`);
+          const parsedVocRows = parseVocFile(rows);
+          setVocRows(parsedVocRows);
+          const debug = getVocEvWorldLogCounts(parsedVocRows);
+          pushLog(`VOC 파일 반영: ${file.name} · EV세상 접수 ${debug.finalReceived}건 / 완료 ${debug.rtCompleted}건`);
         } else {
           pushLog(`분류되지 않은 파일: ${file.name}`);
         }
@@ -2006,6 +2426,8 @@ export default function Dashboard() {
       evPending,
     };
   }, [mergedRows, vocRows]);
+
+  const vocTrend = useMemo(() => getVocTrendByDateRange(vocRows, trendStartDate, trendEndDate), [vocRows, trendStartDate, trendEndDate]);
 
   const getRowsForSummaryType = (type) => {
     if (type === 'total') return mergedRows;
@@ -2977,6 +3399,14 @@ export default function Dashboard() {
                 <StatCard title="임의 OFF" value={`${dashboard.manualOff.toLocaleString()}기`} sub="충전기 중 충전상태 기준" onClick={() => openSummaryModal('manualOff')} />
                 <StatCard title="교체 진행중" value={`${dashboard.replacement.toLocaleString()}기`} sub="교체건 파일 매칭 기준" onClick={() => openSummaryModal('replacement')} />
               </div>
+
+              <WeeklyTrendSection
+                vocTrend={vocTrend}
+                trendStartDate={trendStartDate}
+                trendEndDate={trendEndDate}
+                onTrendStartDateChange={setTrendStartDate}
+                onTrendEndDateChange={setTrendEndDate}
+              />
 
               <div style={styles.topGrid}>
                 <div style={styles.panel}>
@@ -5160,6 +5590,35 @@ const styles = {
   vocKpiLabel: { color: COLORS.sub, fontSize: 13, fontWeight: 800, marginBottom: 6 },
   vocKpiValue: { fontSize: 26, fontWeight: 900, letterSpacing: '-0.02em', marginBottom: 4 },
   vocKpiHint: { color: COLORS.sub, fontSize: 12, lineHeight: 1.4 },
+
+  trendRangeHint: { color: COLORS.sub, fontSize: 13, fontWeight: 700 },
+  trendMiniCard: {
+    background: COLORS.panelSoft,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 16,
+    padding: '14px 16px',
+  },
+  trendDelta: { fontSize: 12, fontWeight: 800 },
+  trendChartGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 },
+  trendChartTitle: { fontSize: 14, fontWeight: 800, color: COLORS.text, marginBottom: 10 },
+  trendLegendRow: { display: 'flex', gap: 16, marginBottom: 10 },
+  trendLegendItem: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: COLORS.sub, fontWeight: 700 },
+  trendLegendDot: { width: 9, height: 9, borderRadius: 3, display: 'inline-block' },
+  trendBarChartWrap: {
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: 6,
+    height: 170,
+    padding: '0 4px',
+    borderBottom: `1px solid ${COLORS.line}`,
+  },
+  trendBarGroup: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flex: 1, height: '100%' },
+  trendBarPair: { display: 'flex', alignItems: 'flex-end', gap: 4, width: '100%', height: 140, justifyContent: 'center' },
+  trendBarColumn: { flex: 1, maxWidth: 16, height: '100%', display: 'flex', alignItems: 'flex-end' },
+  trendBar: { width: '100%', borderRadius: '4px 4px 0 0', minHeight: 2, transition: 'height 0.2s ease' },
+  trendBarLabel: { fontSize: 10, color: COLORS.sub, fontWeight: 700, whiteSpace: 'nowrap' },
+  trendFootnote: { marginTop: 14, fontSize: 12, color: COLORS.sub, lineHeight: 1.6 },
   sectionSubText: { color: COLORS.sub, fontSize: 13, marginTop: 6 },
   fixedOrgBadge: { background: COLORS.blueSoft, color: COLORS.blue, border: `1px solid ${COLORS.blue}22`, borderRadius: 999, padding: '10px 14px', fontSize: 13, fontWeight: 900, height: 'fit-content', whiteSpace: 'nowrap' },
   tableWrapModern: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 18, background: '#fff' },

@@ -144,7 +144,18 @@ const PART_PATTERNS = {
   '터치 패널': /터치[-_\s]*(?:패널|스크린)/i,
 };
 
+const PART_ANALYSIS_EXCLUDED_NAMES = new Set(['충전기']);
+const TOP_PART_MIN_COUNT = 3;
 
+function isExcludedFromPartAnalysis(part) {
+  return PART_ANALYSIS_EXCLUDED_NAMES.has(normalizePartName(part));
+}
+
+function simplifyUnknownCompletedContent(content) {
+  const text = normalizeText(content);
+  if (!text) return '-';
+  return normalizeActionKeyword(text).includes('중복') ? '중복 현장' : text;
+}
 
 
 // 출동 현황 전용: 부품 교체/비교 영역에는 아래 주요 5개만 표시합니다.
@@ -677,6 +688,18 @@ function getVocCompletedAt(row) {
   return row?.completedAtFixed || row?.completedAt || null;
 }
 
+function isEvWorldVocPending(row) {
+  if (!row?.isPending) return false;
+  return isEvWorldVocReceived(row) || row.pendingDisplayOrg === 'EV세상';
+}
+
+function isOverSlaPending(row, referenceAt = new Date()) {
+  const receivedAt = getVocReceivedAt(row);
+  if (!receivedAt) return false;
+  const hours = getWeekdayElapsedHours(receivedAt, referenceAt);
+  return hours !== null && hours > 48;
+}
+
 function summarizeVocTrendPeriod(vocRows, start, end) {
   const summary = { received: 0, completed: 0, completionRate: null, within48: 0, after48: 0, slaRate: null };
 
@@ -847,6 +870,127 @@ function getRegionGroup(value) {
   if (sido === '강원') return '강원권';
   if (sido === '제주') return '제주권';
   return '지역 미기재';
+}
+
+
+const REGION_STATUS_GROUPS = Object.freeze([
+  { key: '수도권', subLabel: '서울·경기·인천' },
+  { key: '충청권', subLabel: '대전·세종·충남·충북' },
+  { key: '강원권', subLabel: '강원' },
+  { key: '경상권', subLabel: '부산·대구·울산·경남·경북' },
+  { key: '전라권', subLabel: '광주·전남·전북' },
+  { key: '제주권', subLabel: '제주' },
+]);
+
+function makeEmptyRegionStatus(meta) {
+  return {
+    region: meta.key,
+    subLabel: meta.subLabel || '',
+    operatingCount: 0,
+    faultCount: 0,
+    received: 0,
+    completed: 0,
+    delayed: 0,
+    within48: 0,
+    after48: 0,
+    faultRate: 0,
+    slaRate: null,
+    barRate: 0,
+  };
+}
+
+function buildRegionLookupFromRows(rows = []) {
+  const byExactId = new Map();
+  const byBaseId = new Map();
+  const bySiteName = new Map();
+
+  rows.forEach((row) => {
+    const region = getRegionGroup(row.address);
+    if (row.chargerId && !byExactId.has(row.chargerId)) byExactId.set(row.chargerId, region);
+    if (row.chargerBaseId && !byBaseId.has(row.chargerBaseId)) byBaseId.set(row.chargerBaseId, region);
+
+    const siteKey = normalizeSiteName(row.siteName);
+    if (siteKey && !bySiteName.has(siteKey)) bySiteName.set(siteKey, region);
+  });
+
+  return { byExactId, byBaseId, bySiteName };
+}
+
+function getVocRegionGroup(row, lookup) {
+  return (
+    lookup.byExactId.get(row.matchId) ||
+    lookup.byBaseId.get(row.matchBaseId) ||
+    lookup.bySiteName.get(row.matchSiteName) ||
+    '지역 미기재'
+  );
+}
+
+function getRegionalStatusByTrendRange(mergedRows = [], vocRows = [], startDateText, endDateText) {
+  const range = getTrendDateRange(startDateText, endDateText);
+  const regionMap = new Map(REGION_STATUS_GROUPS.map((meta) => [meta.key, makeEmptyRegionStatus(meta)]));
+  const ensureRegion = (regionKey) => {
+    const safeKey = regionKey || '지역 미기재';
+    if (!regionMap.has(safeKey)) {
+      regionMap.set(safeKey, makeEmptyRegionStatus({ key: safeKey, subLabel: safeKey === '지역 미기재' ? '주소 매칭 없음' : '' }));
+    }
+    return regionMap.get(safeKey);
+  };
+
+  mergedRows.forEach((row) => {
+    const item = ensureRegion(getRegionGroup(row.address));
+    if (row.isNormalOperation) item.operatingCount += 1;
+    if (row.isFault) item.faultCount += 1;
+  });
+
+  const lookup = buildRegionLookupFromRows(mergedRows);
+  const now = new Date();
+
+  vocRows.forEach((row) => {
+    const receivedAt = getVocReceivedAt(row);
+    const completedAt = getVocCompletedAt(row);
+    const regionItem = ensureRegion(getVocRegionGroup(row, lookup));
+
+    // 신규인입: 선택기간 내 EV세상으로 새로 배정된 고장 AS 건
+    if (isEvWorldVocReceived(row) && receivedAt && receivedAt >= range.start && receivedAt <= range.end) {
+      regionItem.received += 1;
+    }
+
+    // 지연: 현재 EV세상 배정 상태로 남아있고, 접수 후 주말 제외 48시간을 초과한 미완료 건
+    if (isEvWorldVocPending(row) && isOverSlaPending(row, now)) {
+      regionItem.delayed += 1;
+    }
+
+    // SLA: 선택기간 내 EV세상이 완료한 건 중 주말 제외 48시간 이내 처리율
+    if (isEvWorldVocCompleted(row) && completedAt && completedAt >= range.start && completedAt <= range.end) {
+      regionItem.completed += 1;
+      const withinSla = isWithinSla48(receivedAt, completedAt);
+      if (withinSla === true) regionItem.within48 += 1;
+      else if (withinSla === false) regionItem.after48 += 1;
+    }
+  });
+
+  const rows = Array.from(regionMap.values())
+    .map((item) => {
+      const faultRate = item.operatingCount > 0 ? Math.round((item.faultCount / item.operatingCount) * 1000) / 10 : 0;
+      const slaDenominator = item.within48 + item.after48;
+      const slaRate = slaDenominator > 0 ? Math.round((item.within48 / slaDenominator) * 1000) / 10 : null;
+      return { ...item, faultRate, slaRate };
+    })
+    .filter((item) => item.region !== '지역 미기재');
+
+  const maxFaultRate = Math.max(1, ...rows.map((item) => item.faultRate || 0));
+  const orderMap = new Map(REGION_STATUS_GROUPS.map((meta, idx) => [meta.key, idx]));
+
+  return rows
+    .map((item) => ({
+      ...item,
+      barRate: Math.min(100, Math.round(((item.faultRate || 0) / maxFaultRate) * 1000) / 10),
+    }))
+    .sort((a, b) => {
+      const aOrder = orderMap.has(a.region) ? orderMap.get(a.region) : 999;
+      const bOrder = orderMap.has(b.region) ? orderMap.get(b.region) : 999;
+      return aOrder - bOrder || String(a.region).localeCompare(String(b.region), 'ko');
+    });
 }
 
 
@@ -2039,6 +2183,75 @@ function WeeklyTrendSection({ vocTrend, trendStartDate, trendEndDate, onTrendSta
   );
 }
 
+
+function getRegionCardTone(item) {
+  if ((item.faultRate || 0) >= 5) return { color: COLORS.red, bg: COLORS.redSoft };
+  if ((item.slaRate !== null && item.slaRate < 85) || (item.faultRate || 0) >= 3) return { color: COLORS.orange, bg: COLORS.orangeSoft };
+  return { color: COLORS.blue, bg: COLORS.blueSoft };
+}
+
+function RegionStatusCard({ item }) {
+  const tone = getRegionCardTone(item);
+  const slaText = item.slaRate === null ? '-' : `${item.slaRate}%`;
+
+  return (
+    <div style={{ ...styles.regionStatusCard, borderColor: `${tone.color}22`, background: `linear-gradient(135deg, #ffffff 0%, ${tone.bg} 100%)` }}>
+      <div style={styles.regionStatusTopRow}>
+        <div>
+          <div style={styles.regionStatusTitle}>{item.region}</div>
+          <div style={styles.regionStatusSub}>{item.subLabel || '권역 정보'}</div>
+        </div>
+        <div style={{ ...styles.regionStatusRate, color: tone.color }}>{item.faultRate.toFixed(1)}%</div>
+      </div>
+
+      <div style={styles.regionStatusBarTrack}>
+        <div style={{ ...styles.regionStatusBarFill, width: `${item.barRate}%`, background: tone.color }} />
+      </div>
+
+      <div style={styles.regionStatusMetricGrid}>
+        <div style={styles.regionStatusMetricBox}>
+          <div style={styles.regionStatusMetricLabel}>고장</div>
+          <div style={styles.regionStatusMetricValue}>{item.faultCount.toLocaleString()}기</div>
+        </div>
+        <div style={styles.regionStatusMetricBox}>
+          <div style={styles.regionStatusMetricLabel}>지연</div>
+          <div style={styles.regionStatusMetricValue}>{item.delayed.toLocaleString()}건</div>
+        </div>
+        <div style={styles.regionStatusMetricBox}>
+          <div style={styles.regionStatusMetricLabel}>신규인입</div>
+          <div style={styles.regionStatusMetricValue}>{item.received.toLocaleString()}건</div>
+        </div>
+      </div>
+
+      <div style={styles.regionStatusFooter}>
+        <span>SLA <strong>{slaText}</strong></span>
+        <span>{item.operatingCount.toLocaleString()}기 운영</span>
+      </div>
+    </div>
+  );
+}
+
+function RegionStatusSection({ rows, rangeLabel }) {
+  return (
+    <div style={{ ...styles.panel, marginBottom: 18 }}>
+      <div style={styles.sectionTitleRow}>
+        <div>
+          <div style={styles.sectionTitleNoMargin}>지역별 현황 <span style={styles.fixedOrgBadge}>EV세상 운영 인사이트</span></div>
+          <div style={styles.trendRangeHint}>상단 %와 고장은 RAW 현재 기준 / 지연은 현재 미완료 48시간 초과 / 신규인입·SLA는 선택기간 {rangeLabel || '-'} 기준</div>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div style={styles.regionStatusEmpty}>지역별로 집계할 데이터가 없습니다.</div>
+      ) : (
+        <div style={styles.regionStatusGrid}>
+          {rows.map((item) => <RegionStatusCard key={item.region} item={item} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SideNavItem({ active, icon, label, onClick }) {
   return (
     <button onClick={onClick} style={active ? styles.sideNavActive : styles.sideNavItem}>
@@ -2428,6 +2641,10 @@ export default function Dashboard() {
   }, [mergedRows, vocRows]);
 
   const vocTrend = useMemo(() => getVocTrendByDateRange(vocRows, trendStartDate, trendEndDate), [vocRows, trendStartDate, trendEndDate]);
+  const regionalStatusRows = useMemo(
+    () => getRegionalStatusByTrendRange(mergedRows, vocRows, trendStartDate, trendEndDate),
+    [mergedRows, vocRows, trendStartDate, trendEndDate]
+  );
 
   const getRowsForSummaryType = (type) => {
     if (type === 'total') return mergedRows;
@@ -3100,8 +3317,9 @@ export default function Dashboard() {
       siteMap.set(siteKey, (siteMap.get(siteKey) || 0) + 1);
 
       if (row.actionType === '부품사용') {
-        const parts = row.parts?.length ? row.parts : ['부품명 미기재'];
-        parts.forEach((part) => partMap.set(part, (partMap.get(part) || 0) + 1));
+        const reportParts = (row.parts?.length ? row.parts : ['부품명 미기재'])
+          .filter((part) => !isExcludedFromPartAnalysis(part));
+        reportParts.forEach((part) => partMap.set(part, (partMap.get(part) || 0) + 1));
       }
 
       if (examples[row.actionType] && examples[row.actionType].length < 3) {
@@ -3111,6 +3329,7 @@ export default function Dashboard() {
 
     const topParts = Array.from(partMap.entries())
       .map(([part, count]) => ({ part, count, rate: percentOf(count, selectedActionModelStat.part) }))
+      .filter((item) => item.count >= TOP_PART_MIN_COUNT)
       .sort((a, b) => b.count - a.count || a.part.localeCompare(b.part, 'ko'))
       .slice(0, 5);
 
@@ -3136,12 +3355,14 @@ export default function Dashboard() {
     const map = new Map();
     actionStatusRows.forEach((row) => {
       if (row.actionType !== '부품사용') return;
-      row.parts.forEach((part) => {
-        if (!map.has(part)) map.set(part, { part, count: 0, models: new Map() });
-        const item = map.get(part);
-        item.count += 1;
-        item.models.set(row.model, (item.models.get(row.model) || 0) + 1);
-      });
+      row.parts
+        .filter((part) => !isExcludedFromPartAnalysis(part))
+        .forEach((part) => {
+          if (!map.has(part)) map.set(part, { part, count: 0, models: new Map() });
+          const item = map.get(part);
+          item.count += 1;
+          item.models.set(row.model, (item.models.get(row.model) || 0) + 1);
+        });
     });
 
     return Array.from(map.values())
@@ -3153,6 +3374,7 @@ export default function Dashboard() {
           .sort((a, b) => b.count - a.count || a.model.localeCompare(b.model, 'ko'))
           .slice(0, 3),
       }))
+      .filter((item) => item.count >= TOP_PART_MIN_COUNT)
       .sort((a, b) => b.count - a.count || a.part.localeCompare(b.part, 'ko'));
   }, [actionStatusRows]);
 
@@ -3407,6 +3629,8 @@ export default function Dashboard() {
                 onTrendStartDateChange={setTrendStartDate}
                 onTrendEndDateChange={setTrendEndDate}
               />
+
+              <RegionStatusSection rows={regionalStatusRows} rangeLabel={vocTrend?.rangeLabel} />
 
               <div style={styles.topGrid}>
                 <div style={styles.panel}>
@@ -3941,7 +4165,7 @@ export default function Dashboard() {
                       <div style={styles.actionReportBox}>
                         <div style={styles.actionReportBoxTitle}>주요 사용 부품 TOP5</div>
                         {selectedActionModelInsight.topParts.length === 0 ? (
-                          <div style={styles.actionReportEmpty}>부품사용으로 분류된 내역이 없습니다.</div>
+                          <div style={styles.actionReportEmpty}>3건 이상 반복된 부품사용 내역이 없습니다.</div>
                         ) : selectedActionModelInsight.topParts.map((item, idx) => (
                           <div key={item.part} style={styles.actionReportRankRow}>
                             <div style={styles.actionReportRankLeft}>
@@ -4014,7 +4238,7 @@ export default function Dashboard() {
                 <div style={styles.panel}>
                   <div style={styles.sectionTitle}>부품별 고장 추정 TOP</div>
                   {actionPartStats.length === 0 ? (
-                    <div style={{ color: COLORS.sub }}>부품사용으로 분류된 완료내용이 없습니다.</div>
+                    <div style={{ color: COLORS.sub }}>3건 이상 반복된 부품사용 완료내용이 없습니다.</div>
                   ) : (
                     <div style={{ display: 'grid', gap: 10 }}>
                       {actionPartStats.slice(0, 10).map((item, idx) => (
@@ -4040,19 +4264,22 @@ export default function Dashboard() {
                   <div style={{ display: 'grid', gap: 8, maxHeight: 360, overflowY: 'auto' }}>
                     {actionUnknownRows.length === 0 ? (
                       <div style={{ color: COLORS.sub }}>미분류 완료내용이 없습니다.</div>
-                    ) : actionUnknownRows.map((row) => (
-                      <div key={row.key} style={styles.logItem} title={row.completedContent}>
-                        <strong>{row.model}</strong> · {row.completedAtText}<br />
-                        {row.completedContent.length > 90 ? `${row.completedContent.slice(0, 90)}...` : row.completedContent}
-                      </div>
-                    ))}
+                    ) : actionUnknownRows.map((row) => {
+                      const displayContent = simplifyUnknownCompletedContent(row.completedContent);
+                      return (
+                        <div key={row.key} style={styles.logItem} title={row.completedContent}>
+                          <strong>{row.model}</strong> · {row.completedAtText}<br />
+                          {displayContent.length > 90 ? `${displayContent.slice(0, 90)}...` : displayContent}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
 
               <div style={styles.panel}>
                 <div style={styles.sectionTitle}>조치 상세 리스트</div>
-                <div style={styles.tableWrap}>
+                <div style={{ ...styles.tableWrap, ...styles.actionDetailTableWrap }}>
                   <table style={styles.table}>
                     <thead>
                       <tr>
@@ -5445,6 +5672,7 @@ const styles = {
     alignItems: 'center',
   },
   tableWrap: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 16 },
+  actionDetailTableWrap: { maxHeight: 920, overflow: 'auto' },
   detailTableWrap: { overflow: 'auto', maxHeight: 760, border: `1px solid ${COLORS.border}`, borderRadius: 16 },
   table: { width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: 13 },
   statusCell: { whiteSpace: 'nowrap', minWidth: 92 },
@@ -5619,8 +5847,27 @@ const styles = {
   trendBar: { width: '100%', borderRadius: '4px 4px 0 0', minHeight: 2, transition: 'height 0.2s ease' },
   trendBarLabel: { fontSize: 10, color: COLORS.sub, fontWeight: 700, whiteSpace: 'nowrap' },
   trendFootnote: { marginTop: 14, fontSize: 12, color: COLORS.sub, lineHeight: 1.6 },
+  regionStatusGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 14 },
+  regionStatusCard: {
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 18,
+    padding: 16,
+    boxShadow: '0 10px 24px rgba(15, 23, 42, 0.05)',
+  },
+  regionStatusTopRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 12 },
+  regionStatusTitle: { color: COLORS.text, fontSize: 16, fontWeight: 950, letterSpacing: '-0.02em' },
+  regionStatusSub: { color: COLORS.sub, fontSize: 12, fontWeight: 800, marginTop: 5, lineHeight: 1.35 },
+  regionStatusRate: { fontSize: 23, fontWeight: 950, letterSpacing: '-0.03em', whiteSpace: 'nowrap' },
+  regionStatusBarTrack: { height: 6, borderRadius: 999, background: 'rgba(15, 23, 42, 0.08)', overflow: 'hidden', marginBottom: 12 },
+  regionStatusBarFill: { height: '100%', borderRadius: 999, minWidth: 2 },
+  regionStatusMetricGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginBottom: 12 },
+  regionStatusMetricBox: { background: 'rgba(255,255,255,0.72)', border: `1px solid ${COLORS.line}`, borderRadius: 12, padding: '9px 8px', textAlign: 'center' },
+  regionStatusMetricLabel: { color: COLORS.sub, fontSize: 11, fontWeight: 900, marginBottom: 5, whiteSpace: 'nowrap' },
+  regionStatusMetricValue: { color: COLORS.text, fontSize: 14, fontWeight: 950, whiteSpace: 'nowrap' },
+  regionStatusFooter: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, color: COLORS.slate, fontSize: 12, fontWeight: 850, whiteSpace: 'nowrap' },
+  regionStatusEmpty: { border: `1px dashed ${COLORS.border}`, borderRadius: 16, padding: 22, color: COLORS.sub, textAlign: 'center', fontWeight: 800, background: COLORS.panelSoft },
   sectionSubText: { color: COLORS.sub, fontSize: 13, marginTop: 6 },
-  fixedOrgBadge: { background: COLORS.blueSoft, color: COLORS.blue, border: `1px solid ${COLORS.blue}22`, borderRadius: 999, padding: '10px 14px', fontSize: 13, fontWeight: 900, height: 'fit-content', whiteSpace: 'nowrap' },
+  fixedOrgBadge: { display: 'inline-flex', alignItems: 'center', gap: 6, background: `linear-gradient(135deg, ${COLORS.blue}, #0f3fb8)`, color: '#fff', border: `1px solid ${COLORS.blue}22`, borderRadius: 10, padding: '6px 10px', fontSize: 11, fontWeight: 950, letterSpacing: '-0.01em', boxShadow: '0 6px 16px rgba(29, 99, 233, 0.18)', height: 'fit-content', whiteSpace: 'nowrap', verticalAlign: 'middle' },
   tableWrapModern: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 18, background: '#fff' },
   tableModern: { width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', fontSize: 14 },
   rankBadge: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 999, background: COLORS.lightGraySoft, color: COLORS.slate, fontWeight: 900 },

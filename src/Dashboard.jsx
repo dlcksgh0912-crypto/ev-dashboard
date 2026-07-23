@@ -1,3 +1,4 @@
+// CareHub Dashboard update: 2026-07-23 / dispatch VOC duplicate KPI card
 import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { supabase } from './supabase';
@@ -677,7 +678,8 @@ function isEvWorldVocReceived(row) {
 
 function isEvWorldVocCompleted(row) {
   if (!row) return false;
-  return isEvWorldText(row.completedOrgFixed) || isEvWorldText(row.completedOrg);
+  // 완료 기준은 VOC 엑셀 실제 T열(완료자 소속)이 EV세상인 건만 사용합니다.
+  return isEvWorldText(row.completedOrgFixed);
 }
 
 function getVocReceivedAt(row) {
@@ -1063,6 +1065,12 @@ function classifyCompletedAction(value) {
   const original = normalizeText(value);
   const compact = normalizeActionKeyword(original);
   if (!compact) return { type: '미분류', label: '미분류' };
+
+  // 완료내용에 '중복'이 포함되면 다른 조치 키워드보다 우선하여 중복건으로 분류합니다.
+  // 완료건수와 SLA 집계에서는 제외하지 않고, 조치유형만 별도로 구분합니다.
+  if (compact.includes('중복')) {
+    return { type: '중복건', label: '중복건' };
+  }
 
   const isHqTransfer = /본사(이관|조치|처리|요청|문의|확인)|제조사(이관|조치|처리|요청|문의|확인)|연구소(이관|요청|확인)|개발(요청|이관|확인)/i.test(compact);
   if (isHqTransfer) {
@@ -2236,7 +2244,7 @@ function RegionStatusSection({ rows, rangeLabel }) {
     <div style={{ ...styles.panel, marginBottom: 18 }}>
       <div style={styles.sectionTitleRow}>
         <div>
-          <div style={styles.sectionTitleNoMargin}>지역별 현황 <span style={styles.fixedOrgBadge}>EV세상 운영 인사이트</span></div>
+          <div style={styles.sectionTitleNoMargin}>지역별 현황</div>
           <div style={styles.trendRangeHint}>상단 %와 고장은 RAW 현재 기준 / 지연은 현재 미완료 48시간 초과 / 신규인입·SLA는 선택기간 {rangeLabel || '-'} 기준</div>
         </div>
       </div>
@@ -2246,6 +2254,180 @@ function RegionStatusSection({ rows, rangeLabel }) {
       ) : (
         <div style={styles.regionStatusGrid}>
           {rows.map((item) => <RegionStatusCard key={item.region} item={item} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function getStaffPerformanceByTrendRange(vocRows = [], startDateText, endDateText) {
+  const range = getTrendDateRange(startDateText, endDateText);
+  const map = new Map();
+
+  vocRows.forEach((row) => {
+    const completedAt = row?.completedAtFixed || getVocCompletedAt(row);
+    if (!isEvWorldText(row?.completedOrgFixed) || !completedAt || completedAt < range.start || completedAt > range.end) return;
+
+    const name = normalizeText(row.completedName) || '(완료자 미기재)';
+    if (!map.has(name)) {
+      map.set(name, {
+        name,
+        completed: 0,
+        within48: 0,
+        after48: 0,
+        simple: 0,
+        part: 0,
+        hq: 0,
+        duplicate: 0,
+        unknown: 0,
+        slaRate: null,
+        classifiedTotal: 0,
+      });
+    }
+
+    const item = map.get(name);
+    item.completed += 1;
+
+    const withinSla = isWithinSla48(getVocReceivedAt(row), completedAt);
+    if (withinSla === true) item.within48 += 1;
+    else if (withinSla === false) item.after48 += 1;
+
+    const action = classifyCompletedAction(row.completedContent);
+    if (action.type === '단순조치') item.simple += 1;
+    else if (action.type === '부품사용') item.part += 1;
+    else if (action.type === '본사이관') item.hq += 1;
+    else if (action.type === '중복건') item.duplicate += 1;
+    else item.unknown += 1;
+  });
+
+  return Array.from(map.values())
+    .map((item) => {
+      const slaDenominator = item.within48 + item.after48;
+      const classifiedTotal = item.simple + item.part + item.hq + item.duplicate;
+      const slaRate = slaDenominator > 0
+        ? Math.round((item.within48 / slaDenominator) * 1000) / 10
+        : null;
+      return { ...item, slaRate, classifiedTotal };
+    })
+    .filter((item) => item.completed > 0)
+    .sort((a, b) => b.completed - a.completed || (b.slaRate ?? -1) - (a.slaRate ?? -1) || a.name.localeCompare(b.name, 'ko'));
+}
+
+function StaffActionDonut({ item }) {
+  const total = item.classifiedTotal || 0;
+  const data = [
+    { name: '단순조치', value: item.simple, color: COLORS.green },
+    { name: '부품교체', value: item.part, color: COLORS.orange },
+    { name: '본사이관', value: item.hq, color: COLORS.violet },
+    { name: '중복건', value: item.duplicate, color: COLORS.blue },
+  ];
+
+  let background = COLORS.line;
+  if (total > 0) {
+    let current = 0;
+    const stops = data.map((entry) => {
+      const start = (current / total) * 360;
+      current += entry.value;
+      const end = (current / total) * 360;
+      return `${entry.color} ${start}deg ${end}deg`;
+    });
+    background = `conic-gradient(${stops.join(', ')})`;
+  }
+
+  return (
+    <div style={styles.staffDonutLayout}>
+      <div style={{ ...styles.staffDonut, background }}>
+        <div style={styles.staffDonutInner}>
+          <div style={styles.staffDonutLabel}>조치분류</div>
+          <div style={styles.staffDonutValue}>{total.toLocaleString()}건</div>
+        </div>
+      </div>
+
+      <div style={styles.staffDonutLegend}>
+        {data.map((entry) => (
+          <div key={entry.name} style={styles.staffDonutLegendRow}>
+            <span style={{ ...styles.staffDonutLegendDot, background: entry.color }} />
+            <span style={styles.staffDonutLegendName}>{entry.name}</span>
+            <strong>{entry.value.toLocaleString()}건 · {percentOf(entry.value, total)}%</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StaffPerformanceCard({ item, rank }) {
+  const slaText = item.slaRate === null ? '-' : `${item.slaRate}%`;
+  const slaColor = item.slaRate === null
+    ? COLORS.slate
+    : item.slaRate >= 85
+      ? COLORS.green
+      : item.slaRate >= 70
+        ? COLORS.orange
+        : COLORS.red;
+
+  return (
+    <div style={styles.staffPerformanceCard}>
+      <div style={styles.staffPerformanceTopRow}>
+        <div style={styles.staffNameWrap}>
+          <span style={rank <= 3 ? styles.rankBadgeTop : styles.rankBadge}>{rank}</span>
+          <div>
+            <div style={styles.staffPerformanceName}>{item.name}</div>
+            <div style={styles.staffPerformanceOrg}>EV세상 완료자</div>
+          </div>
+        </div>
+        <div style={{ ...styles.staffSlaBadge, color: slaColor, background: `${slaColor}12`, borderColor: `${slaColor}22` }}>
+          SLA {slaText}
+        </div>
+      </div>
+
+      <div style={styles.staffPerformanceMetricRow}>
+        <div style={styles.staffPerformanceMetricBox}>
+          <div style={styles.staffPerformanceMetricLabel}>완료건수</div>
+          <div style={styles.staffPerformanceMetricValue}>{item.completed.toLocaleString()}건</div>
+        </div>
+        <div style={styles.staffPerformanceMetricBox}>
+          <div style={styles.staffPerformanceMetricLabel}>48시간 이내</div>
+          <div style={{ ...styles.staffPerformanceMetricValue, color: slaColor }}>{item.within48.toLocaleString()}건</div>
+        </div>
+      </div>
+
+      <StaffActionDonut item={item} />
+
+      {item.unknown > 0 && (
+        <div style={styles.staffUnknownHint}>미분류 완료내용 {item.unknown.toLocaleString()}건은 도넛 비율에서 제외</div>
+      )}
+    </div>
+  );
+}
+
+function StaffPerformanceSection({ rows, rangeLabel }) {
+  const totalCompleted = rows.reduce((sum, item) => sum + item.completed, 0);
+
+  return (
+    <div style={{ ...styles.panel, marginBottom: 18 }}>
+      <div style={styles.sectionTitleRow}>
+        <div>
+          <div style={styles.sectionTitleNoMargin}>인원별 조치 현황</div>
+          <div style={styles.trendRangeHint}>
+            선택기간 {rangeLabel || '-'} · 완료일시(R열) 기준 · 완료자 소속(T열)이 EV세상인 건만 집계 · 주말 제외 48시간 SLA
+          </div>
+        </div>
+        <div style={styles.staffPerformanceSummary}>
+          <span>{rows.length.toLocaleString()}명</span>
+          <strong>{totalCompleted.toLocaleString()}건 완료</strong>
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        <div style={styles.regionStatusEmpty}>선택한 기간의 EV세상 인원별 완료 데이터가 없습니다.</div>
+      ) : (
+        <div style={styles.staffPerformanceScroll}>
+          <div style={styles.staffPerformanceGrid}>
+            {rows.map((item, index) => (
+              <StaffPerformanceCard key={item.name} item={item} rank={index + 1} />
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -2645,6 +2827,10 @@ export default function Dashboard() {
     () => getRegionalStatusByTrendRange(mergedRows, vocRows, trendStartDate, trendEndDate),
     [mergedRows, vocRows, trendStartDate, trendEndDate]
   );
+  const staffPerformanceRows = useMemo(
+    () => getStaffPerformanceByTrendRange(vocRows, trendStartDate, trendEndDate),
+    [vocRows, trendStartDate, trendEndDate]
+  );
 
   const getRowsForSummaryType = (type) => {
     if (type === 'total') return mergedRows;
@@ -2972,7 +3158,7 @@ export default function Dashboard() {
       const safeName = name || '(미기재)';
       const key = `${safeOrg}__${safeName}`;
       if (!map.has(key)) {
-        map.set(key, { org: safeOrg, name: safeName, received: 0, completed: 0, pending: 0, within48: 0, after48: 0 });
+        map.set(key, { org: safeOrg, name: safeName, received: 0, completed: 0, duplicate: 0, pending: 0, within48: 0, after48: 0 });
       }
       return map.get(key);
     };
@@ -2995,6 +3181,9 @@ export default function Dashboard() {
         if (orgFilter === 'all' || completedOrg === orgFilter) {
           const stat = ensure(completedOrg, completedName);
           stat.completed += 1;
+          if (normalizeActionKeyword(row.completedContent).includes('중복')) {
+            stat.duplicate += 1;
+          }
 
           const withinSla = isWithinSla48(row.receivedAt, row.completedAt);
           if (withinSla === true) stat.within48 += 1;
@@ -3051,6 +3240,7 @@ export default function Dashboard() {
   const vocPerformanceSummary = useMemo(() => {
     const totalReceived = vocPerformanceStats.reduce((sum, row) => sum + row.received, 0);
     const totalCompleted = vocPerformanceStats.reduce((sum, row) => sum + row.completed, 0);
+    const totalDuplicate = vocPerformanceStats.reduce((sum, row) => sum + row.duplicate, 0);
     const totalPending = vocPerformanceStats.reduce((sum, row) => sum + row.pending, 0);
     const totalWithin48 = vocPerformanceStats.reduce((sum, row) => sum + row.within48, 0);
     const totalAfter48 = vocPerformanceStats.reduce((sum, row) => sum + row.after48, 0);
@@ -3058,7 +3248,7 @@ export default function Dashboard() {
     const completionRate = denominator > 0 ? Math.round((totalCompleted / denominator) * 1000) / 10 : 0;
     const slaDenominator = totalWithin48 + totalAfter48;
     const slaRate = slaDenominator > 0 ? Math.round((totalWithin48 / slaDenominator) * 1000) / 10 : 0;
-    return { totalReceived, totalCompleted, totalPending, totalWithin48, totalAfter48, completionRate, slaRate };
+    return { totalReceived, totalCompleted, totalDuplicate, totalPending, totalWithin48, totalAfter48, completionRate, slaRate };
   }, [vocPerformanceStats]);
 
   const isVocSlaSortMode = vocPerformanceSortFilter === 'slaDesc';
@@ -3253,21 +3443,23 @@ export default function Dashboard() {
     const simple = actionStatusRows.filter((row) => row.actionType === '단순조치').length;
     const part = actionStatusRows.filter((row) => row.actionType === '부품사용').length;
     const hq = actionStatusRows.filter((row) => row.actionType === '본사이관').length;
+    const duplicate = actionStatusRows.filter((row) => row.actionType === '중복건').length;
     const unknown = actionStatusRows.filter((row) => row.actionType === '미분류').length;
-    return { total, simple, part, hq, unknown };
+    return { total, simple, part, hq, duplicate, unknown };
   }, [actionStatusRows]);
 
   const actionModelStats = useMemo(() => {
     const map = new Map();
     actionStatusRows.forEach((row) => {
       if (!map.has(row.model)) {
-        map.set(row.model, { model: row.model, total: 0, simple: 0, part: 0, hq: 0, unknown: 0, topParts: [] });
+        map.set(row.model, { model: row.model, total: 0, simple: 0, part: 0, hq: 0, duplicate: 0, unknown: 0, topParts: [] });
       }
       const item = map.get(row.model);
       item.total += 1;
       if (row.actionType === '단순조치') item.simple += 1;
       else if (row.actionType === '부품사용') item.part += 1;
       else if (row.actionType === '본사이관') item.hq += 1;
+      else if (row.actionType === '중복건') item.duplicate += 1;
       else item.unknown += 1;
     });
 
@@ -3632,6 +3824,8 @@ export default function Dashboard() {
 
               <RegionStatusSection rows={regionalStatusRows} rangeLabel={vocTrend?.rangeLabel} />
 
+              <StaffPerformanceSection rows={staffPerformanceRows} rangeLabel={vocTrend?.rangeLabel} />
+
               <div style={styles.topGrid}>
                 <div style={styles.panel}>
                   <div style={styles.sectionTitle}>판정 기준</div>
@@ -3857,9 +4051,10 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div style={styles.vocKpiGrid}>
+                <div style={{ ...styles.vocKpiGrid, gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
                   <VocKpiCard label="총 접수" value={`${vocPerformanceSummary.totalReceived.toLocaleString()}건`} hint="B열 접수일시 기준" color={COLORS.blue} bg={COLORS.blueSoft} />
                   <VocKpiCard label="완료" value={`${vocPerformanceSummary.totalCompleted.toLocaleString()}건`} hint="R열 완료일시 기준" color={COLORS.green} bg={COLORS.greenSoft} />
+                  <VocKpiCard label="중복건" value={`${vocPerformanceSummary.totalDuplicate.toLocaleString()}건`} hint="완료내용 중복 포함" color={COLORS.yellow} bg={COLORS.yellowSoft} />
                   <VocKpiCard label="진행중" value={`${vocPerformanceSummary.totalPending.toLocaleString()}건`} hint="미완료 VOC 기준" color={COLORS.orange} bg={COLORS.orangeSoft} />
                   <VocKpiCard label="완료율" value={`${vocPerformanceSummary.completionRate}%`} hint="완료 / 완료+진행중" color={COLORS.violet} bg={COLORS.violetSoft} />
                   {isVocSlaSortMode && (
@@ -4030,7 +4225,7 @@ export default function Dashboard() {
                   <div>
                     <div style={styles.vocEyebrow}>FAULT ACTION ANALYSIS</div>
                     <div style={styles.vocHeroTitle}>고장 조치 현황</div>
-                    <div style={styles.vocHeroSub}>VOC 완료자소속(T열)이 EV세상인 건만 기준으로, 완료내용(U열)의 단순조치·부품사용·본사이관 비율을 분석합니다.</div>
+                    <div style={styles.vocHeroSub}>VOC 완료자소속(T열)이 EV세상인 건만 기준으로, 완료내용(U열)의 단순조치·부품사용·본사이관·중복건 비율을 분석합니다.</div>
                   </div>
                   <div style={styles.vocControlBox}>
                     <select
@@ -4054,11 +4249,12 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <div style={styles.vocKpiGrid}>
+                <div style={{ ...styles.vocKpiGrid, gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}>
                   <VocKpiCard label="EV세상 완료" value={`${actionSummary.total.toLocaleString()}건`} hint="T열 완료자소속 기준" color={COLORS.blue} bg={COLORS.blueSoft} />
                   <VocKpiCard label="단순조치" value={`${actionSummary.simple.toLocaleString()}건`} hint={`${percentOf(actionSummary.simple, actionSummary.total)}%`} color={COLORS.green} bg={COLORS.greenSoft} />
                   <VocKpiCard label="부품사용" value={`${actionSummary.part.toLocaleString()}건`} hint={`${percentOf(actionSummary.part, actionSummary.total)}%`} color={COLORS.orange} bg={COLORS.orangeSoft} />
                   <VocKpiCard label="본사이관" value={`${actionSummary.hq.toLocaleString()}건`} hint={`${percentOf(actionSummary.hq, actionSummary.total)}%`} color={COLORS.violet} bg={COLORS.violetSoft} />
+                  <VocKpiCard label="중복건" value={`${actionSummary.duplicate.toLocaleString()}건`} hint={`${percentOf(actionSummary.duplicate, actionSummary.total)}%`} color={COLORS.yellow} bg={COLORS.yellowSoft} />
                 </div>
               </div>
 
@@ -5866,6 +6062,47 @@ const styles = {
   regionStatusMetricValue: { color: COLORS.text, fontSize: 14, fontWeight: 950, whiteSpace: 'nowrap' },
   regionStatusFooter: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, color: COLORS.slate, fontSize: 12, fontWeight: 850, whiteSpace: 'nowrap' },
   regionStatusEmpty: { border: `1px dashed ${COLORS.border}`, borderRadius: 16, padding: 22, color: COLORS.sub, textAlign: 'center', fontWeight: 800, background: COLORS.panelSoft },
+  staffPerformanceSummary: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    background: COLORS.panelSoft,
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 12,
+    padding: '9px 12px',
+    color: COLORS.sub,
+    fontSize: 12,
+    whiteSpace: 'nowrap',
+  },
+  staffPerformanceScroll: { maxHeight: 760, overflowY: 'auto', paddingRight: 4 },
+  staffPerformanceGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 14 },
+  staffPerformanceCard: {
+    background: 'linear-gradient(135deg, #ffffff 0%, #fbfdff 58%, #f5f9ff 100%)',
+    border: `1px solid ${COLORS.border}`,
+    borderRadius: 20,
+    padding: 16,
+    boxShadow: '0 10px 24px rgba(15, 23, 42, 0.05)',
+    minWidth: 0,
+  },
+  staffPerformanceTopRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, marginBottom: 13 },
+  staffNameWrap: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 },
+  staffPerformanceName: { color: COLORS.text, fontSize: 16, fontWeight: 950, letterSpacing: '-0.02em', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  staffPerformanceOrg: { color: COLORS.sub, fontSize: 11, fontWeight: 800, marginTop: 4 },
+  staffSlaBadge: { border: '1px solid transparent', borderRadius: 999, padding: '7px 9px', fontSize: 11.5, fontWeight: 950, whiteSpace: 'nowrap', flexShrink: 0 },
+  staffPerformanceMetricRow: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 },
+  staffPerformanceMetricBox: { background: 'rgba(255,255,255,0.82)', border: `1px solid ${COLORS.line}`, borderRadius: 13, padding: '10px 11px' },
+  staffPerformanceMetricLabel: { color: COLORS.sub, fontSize: 11, fontWeight: 900, marginBottom: 5 },
+  staffPerformanceMetricValue: { color: COLORS.text, fontSize: 18, fontWeight: 950, letterSpacing: '-0.02em' },
+  staffDonutLayout: { display: 'grid', gridTemplateColumns: '94px minmax(0, 1fr)', alignItems: 'center', gap: 13 },
+  staffDonut: { width: 94, height: 94, borderRadius: '50%', display: 'grid', placeItems: 'center', flexShrink: 0 },
+  staffDonutInner: { width: 62, height: 62, borderRadius: '50%', background: '#fff', display: 'grid', placeContent: 'center', textAlign: 'center', boxShadow: 'inset 0 0 0 1px rgba(217, 226, 239, 0.8)' },
+  staffDonutLabel: { color: COLORS.sub, fontSize: 10, fontWeight: 850, lineHeight: 1.2 },
+  staffDonutValue: { color: COLORS.text, fontSize: 15, fontWeight: 950, marginTop: 2 },
+  staffDonutLegend: { display: 'grid', gap: 8, minWidth: 0 },
+  staffDonutLegendRow: { display: 'grid', gridTemplateColumns: '9px minmax(0, 1fr) auto', alignItems: 'center', gap: 7, color: COLORS.slate, fontSize: 11.5, fontWeight: 800 },
+  staffDonutLegendDot: { width: 9, height: 9, borderRadius: '50%' },
+  staffDonutLegendName: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  staffUnknownHint: { marginTop: 11, color: COLORS.sub, fontSize: 10.5, fontWeight: 750, lineHeight: 1.4, background: COLORS.lightGraySoft, borderRadius: 9, padding: '6px 8px' },
   sectionSubText: { color: COLORS.sub, fontSize: 13, marginTop: 6 },
   fixedOrgBadge: { display: 'inline-flex', alignItems: 'center', gap: 6, background: `linear-gradient(135deg, ${COLORS.blue}, #0f3fb8)`, color: '#fff', border: `1px solid ${COLORS.blue}22`, borderRadius: 10, padding: '6px 10px', fontSize: 11, fontWeight: 950, letterSpacing: '-0.01em', boxShadow: '0 6px 16px rgba(29, 99, 233, 0.18)', height: 'fit-content', whiteSpace: 'nowrap', verticalAlign: 'middle' },
   tableWrapModern: { overflowX: 'auto', border: `1px solid ${COLORS.border}`, borderRadius: 18, background: '#fff' },

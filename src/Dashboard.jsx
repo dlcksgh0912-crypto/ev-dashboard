@@ -1100,6 +1100,21 @@ function classifyCompletedAction(value) {
   return { type: '미분류', label: '미분류' };
 }
 
+function classifyRecurrenceSymptom(value) {
+  const original = normalizeText(value);
+  const compact = normalizeActionKeyword(original);
+  if (!compact) return '기타';
+
+  if (/미수신|통신(불량|오류|에러|끊김|두절|이상)|오프라인|모뎀|서버(연결|접속)|네트워크/.test(compact)) return '통신불량';
+  if (/화면|lcd|엘씨디|디스플레이|터치|검은화면|화면꺼짐/.test(compact)) return '화면·터치';
+  if (/카드(인식|인증)|rfid|결제(불가|오류)|인증(불가|오류)/.test(compact)) return '카드인식';
+  if (/커넥터|컨넥터|충전건|케이블|체결|분리(불가|안됨)|잠금|락/.test(compact)) return '커넥터';
+  if (/차단기|트립|전원|꺼짐|부팅|누전|정전|무전원/.test(compact)) return '차단기·전원';
+  if (/저속|속도(저하|느림|이상)|출력(저하|부족|이상)|충전량(부족|이상)/.test(compact)) return '충전속도';
+  if (/충전(불가|안됨|실패|시작불가|중단|끊김|종료|오류|에러)|충전이안|작동안|사용불가/.test(compact)) return '충전불가';
+  return '기타';
+}
+
 function extractActionPartNames(value) {
   const text = normalizeText(value);
   if (!text) return ['미기재'];
@@ -1392,6 +1407,7 @@ function mapVocColumns(headerRow) {
     completedName: withFallback(['완료자명', '완료자 명', '완료 담당자'], 18),
     completedOrg: withFallback(['완료자 소속', '완료 소속'], VOC_COMPLETED_ORG_INDEX),
     completedContent: withFallback(['완료내용', '완료 내용', '조치내용', '조치 내용'], 20),
+    receivedContent: findHeaderIndex(headers, ['접수내용', '접수 내용', '문의내용', '문의 내용', '고장내용', '고장 내용', 'VOC 내용', 'VOC내용']),
     receivedAt: findHeaderIndex(headers, ['접수일', '접수일시']),
     cumulativeCharge: findHeaderIndex(headers, ['누적충전량', '누적 충전량', '누적 충전량(kWh)', '누적충전', '충전량']),
   };
@@ -1423,6 +1439,7 @@ function parseVocFile(rows) {
       const hasEvWorldTextInRow = row.some((cell) => isEvWorldText(cell));
 
       const completedContent = normalizeText(row[col.completedContent]);
+      const receivedContent = col.receivedContent >= 0 ? normalizeText(row[col.receivedContent]) : '';
       const completedAt = completedAtFixed || parseDateValue(row[col.completedAt]);
       const receivedAt = receivedAtFixed || (col.receivedAt >= 0 ? parseDateValue(row[col.receivedAt]) : null);
       const cumulativeCharge = getVocCumulativeCharge(row, col.cumulativeCharge);
@@ -1462,6 +1479,7 @@ function parseVocFile(rows) {
         pendingDisplayOrg,
         pendingDisplayName,
         completedContent,
+        receivedContent,
         completedAt,
         receivedAt,
         cumulativeCharge,
@@ -3393,6 +3411,21 @@ export default function Dashboard() {
       if (siteKey && !siteModelMap.has(siteKey)) siteModelMap.set(siteKey, model);
     });
 
+    // 동일 충전기의 이전 EV세상 조치 완료 후 60일 이내 새 VOC가 접수되고
+    // 그 VOC도 다시 완료된 경우만 "조치 후 재발생"으로 판정합니다.
+    // 고장 증상·에러코드·사용 부품은 비교하지 않습니다.
+    const recurrenceWindowMs = 60 * 24 * 60 * 60 * 1000;
+    const completedHistoryByCharger = new Map();
+    vocRows.forEach((v) => {
+      if (!isEvSesangOrg(v.completedOrg) || !v.completedAt) return;
+      // 중복 완료는 실제 조치 이력이 아니므로 이후 VOC의 재발생 기준점으로 사용하지 않습니다.
+      if (classifyCompletedAction(v.completedContent).type === '중복건') return;
+      const chargerKey = v.matchId || (v.matchBaseId ? `base:${v.matchBaseId}` : '');
+      if (!chargerKey) return;
+      if (!completedHistoryByCharger.has(chargerKey)) completedHistoryByCharger.set(chargerKey, []);
+      completedHistoryByCharger.get(chargerKey).push(v);
+    });
+
     return vocRows
       .filter((v) => {
         if (!isEvSesangOrg(v.completedOrg)) return false;
@@ -3410,6 +3443,18 @@ export default function Dashboard() {
           '기타';
         const action = classifyCompletedAction(v.completedContent);
         const parts = action.type === '부품사용' ? extractActionPartNames(v.completedContent) : [];
+        const recurrenceKey = v.matchId || (v.matchBaseId ? `base:${v.matchBaseId}` : '');
+        // 현재 완료 건 자체가 중복건이면 재조치로 보지 않습니다.
+        const previousCompleted = action.type !== '중복건' && recurrenceKey && v.receivedAt
+          ? (completedHistoryByCharger.get(recurrenceKey) || [])
+              .filter((history) => {
+                if (history === v || history.completedAt >= v.receivedAt) return false;
+                const elapsedMs = v.receivedAt.getTime() - history.completedAt.getTime();
+                return elapsedMs <= recurrenceWindowMs;
+              })
+              .sort((a, b) => b.completedAt - a.completedAt)[0]
+          : null;
+        const recurrenceSymptom = previousCompleted ? classifyRecurrenceSymptom(v.receivedContent) : '-';
 
         return {
           key: `${v.matchId || v.siteName || 'voc'}-${idx}`,
@@ -3419,6 +3464,12 @@ export default function Dashboard() {
           parts,
           siteName: v.siteName || '-',
           chargerId: v.matchId || (v.matchBaseId ? `${v.matchBaseId}-01` : '-'),
+          recurrenceKey,
+          isRecurrence: !!previousCompleted,
+          recurrenceSymptom,
+          previousCompletedAtText: previousCompleted?.completedAt ? formatDate(previousCompleted.completedAt) : '-',
+          receivedAtText: v.receivedAt ? formatDate(v.receivedAt) : '-',
+          receivedContent: v.receivedContent || '-',
           completedAtText: v.completedAt ? formatDate(v.completedAt) : '-',
           completedName: v.completedName || '-',
           completedContent: v.completedContent || '-',
@@ -3452,10 +3503,14 @@ export default function Dashboard() {
     const map = new Map();
     actionStatusRows.forEach((row) => {
       if (!map.has(row.model)) {
-        map.set(row.model, { model: row.model, total: 0, simple: 0, part: 0, hq: 0, duplicate: 0, unknown: 0, topParts: [] });
+        map.set(row.model, { model: row.model, total: 0, simple: 0, part: 0, hq: 0, duplicate: 0, unknown: 0, chargerKeys: new Set(), recurrenceKeys: new Set(), topParts: [] });
       }
       const item = map.get(row.model);
       item.total += 1;
+      // 재발생률 분모도 실제 조치가 있었던 충전기만 사용합니다.
+      // 중복건만 존재하는 충전기가 분모에 들어가 재발생률을 낮추지 않도록 제외합니다.
+      if (row.actionType !== '중복건' && row.recurrenceKey) item.chargerKeys.add(row.recurrenceKey);
+      if (row.isRecurrence && row.recurrenceKey) item.recurrenceKeys.add(row.recurrenceKey);
       if (row.actionType === '단순조치') item.simple += 1;
       else if (row.actionType === '부품사용') item.part += 1;
       else if (row.actionType === '본사이관') item.hq += 1;
@@ -3482,7 +3537,11 @@ export default function Dashboard() {
         const partRate = percentOf(item.part, item.total);
         const hqRate = percentOf(item.hq, item.total);
         const unknownRate = percentOf(item.unknown, item.total);
-        return { ...item, topParts, simpleRate, partRate, hqRate, unknownRate, profile: getActionModelProfile(item) };
+        const recurrence = item.recurrenceKeys.size;
+        const chargerTotal = item.chargerKeys.size;
+        const recurrenceRate = percentOf(recurrence, chargerTotal);
+        const { chargerKeys, recurrenceKeys, ...publicItem } = item;
+        return { ...publicItem, chargerTotal, recurrence, recurrenceRate, topParts, simpleRate, partRate, hqRate, unknownRate, profile: getActionModelProfile(item) };
       })
       .sort((a, b) => b.total - a.total || a.model.localeCompare(b.model, 'ko'));
   }, [actionStatusRows]);
@@ -3503,6 +3562,8 @@ export default function Dashboard() {
     const partMap = new Map();
     const siteMap = new Map();
     const examples = { 단순조치: [], 부품사용: [], 본사이관: [], 미분류: [] };
+    const recurrenceSymptomMap = new Map();
+    const recurrenceRows = [];
 
     selectedActionModelRows.forEach((row) => {
       const siteKey = row.siteName && row.siteName !== '-' ? row.siteName : '충전소명 없음';
@@ -3517,7 +3578,19 @@ export default function Dashboard() {
       if (examples[row.actionType] && examples[row.actionType].length < 3) {
         examples[row.actionType].push(row.completedContent || '-');
       }
+
+      if (row.isRecurrence) {
+        recurrenceRows.push(row);
+        const symptom = row.recurrenceSymptom || '기타';
+        recurrenceSymptomMap.set(symptom, (recurrenceSymptomMap.get(symptom) || 0) + 1);
+      }
     });
+
+    recurrenceRows.sort((a, b) => String(b.completedAtText).localeCompare(String(a.completedAtText)));
+    const topRecurrenceSymptoms = Array.from(recurrenceSymptomMap.entries())
+      .map(([symptom, count]) => ({ symptom, count, rate: percentOf(count, recurrenceRows.length) }))
+      .sort((a, b) => b.count - a.count || a.symptom.localeCompare(b.symptom, 'ko'))
+      .slice(0, 5);
 
     const topParts = Array.from(partMap.entries())
       .map(([part, count]) => ({ part, count, rate: percentOf(count, selectedActionModelStat.part) }))
@@ -3540,7 +3613,7 @@ export default function Dashboard() {
       ? `${mainSite.siteName}에서 ${mainSite.count.toLocaleString()}건이 확인되어 특정 현장 반복 여부를 함께 확인하는 것이 좋습니다.`
       : '반복 발생 충전소 데이터가 부족합니다.';
 
-    return { topParts, topSites, examples, diagnosis, siteInsight, profile };
+    return { topParts, topSites, topRecurrenceSymptoms, recurrenceRows, examples, diagnosis, siteInsight, profile };
   }, [selectedActionModelRows, selectedActionModelStat]);
 
   const actionPartStats = useMemo(() => {
@@ -3581,6 +3654,11 @@ export default function Dashboard() {
       주요부품: row.parts?.length ? row.parts.join(', ') : '-',
       충전소명: row.siteName || '-',
       충전기ID: row.chargerId || '-',
+      조치후재발생: row.isRecurrence ? '재발생' : '-',
+      재발생증상: row.isRecurrence ? row.recurrenceSymptom : '-',
+      이전완료일시: row.previousCompletedAtText || '-',
+      재접수일시: row.receivedAtText || '-',
+      접수내용: row.receivedContent || '-',
       완료일시: row.completedAtText || '-',
       완료자명: row.completedName || '-',
       완료내용: row.completedContent || '-',
@@ -4262,7 +4340,7 @@ export default function Dashboard() {
                 <div style={styles.sectionTitleRow}>
                   <div>
                     <div style={styles.sectionTitleNoMargin}>모델별 조치 카드</div>
-                    <div style={styles.sectionSubText}>모델별로 단순조치·부품사용·본사이관 비중을 카드로 비교합니다. 카드를 누르면 해당 모델 상세 조치 내역을 바로 확인할 수 있습니다.</div>
+                    <div style={styles.sectionSubText}>모델별로 단순조치·부품사용·본사이관과 조치 후 재발생 충전기를 비교합니다. 재발생은 동일 충전기의 이전 완료 후 60일 이내 새 VOC가 접수되어 다시 완료된 경우이며, 고장 증상은 구분하지 않습니다.</div>
                   </div>
                   <button style={styles.secondaryButton} onClick={downloadActionStatusExcel}>리스트 엑셀 다운로드</button>
                 </div>
@@ -4309,12 +4387,14 @@ export default function Dashboard() {
                             <span style={{ ...styles.actionRatioBadge, color: COLORS.green, background: COLORS.greenSoft }}>단순 {row.simpleRate}%</span>
                             <span style={{ ...styles.actionRatioBadge, color: COLORS.orange, background: COLORS.orangeSoft }}>부품 {row.partRate}%</span>
                             <span style={{ ...styles.actionRatioBadge, color: COLORS.violet, background: COLORS.violetSoft }}>이관 {row.hqRate}%</span>
+                            <span style={{ ...styles.actionRatioBadge, color: COLORS.red, background: COLORS.redSoft }}>재발생 {row.recurrence.toLocaleString()}기 · {row.recurrenceRate}%</span>
                           </div>
 
                           <div style={styles.actionRateStack}>
                             <ActionRateLine label="단순조치" count={row.simple} total={row.total} color={COLORS.green} />
                             <ActionRateLine label="부품사용" count={row.part} total={row.total} color={COLORS.orange} />
                             <ActionRateLine label="본사이관" count={row.hq} total={row.total} color={COLORS.violet} />
+                            <ActionRateLine label="조치 후 재발생" count={row.recurrence} total={row.chargerTotal} color={COLORS.red} unit="기" />
                           </div>
 
                           <div style={styles.actionPartsBox}>
@@ -4337,7 +4417,7 @@ export default function Dashboard() {
                       <div>
                         <div style={styles.selectedActionTitle}>{selectedActionModelStat.model} 조치 분석 리포트</div>
                         <div style={styles.sectionSubText}>
-                          총 {selectedActionModelStat.total.toLocaleString()}건 · 단순조치 {selectedActionModelStat.simple.toLocaleString()}건({selectedActionModelStat.simpleRate}%) / 부품사용 {selectedActionModelStat.part.toLocaleString()}건({selectedActionModelStat.partRate}%) / 본사이관 {selectedActionModelStat.hq.toLocaleString()}건({selectedActionModelStat.hqRate}%)
+                          총 {selectedActionModelStat.total.toLocaleString()}건 · 단순조치 {selectedActionModelStat.simple.toLocaleString()}건({selectedActionModelStat.simpleRate}%) / 부품사용 {selectedActionModelStat.part.toLocaleString()}건({selectedActionModelStat.partRate}%) / 본사이관 {selectedActionModelStat.hq.toLocaleString()}건({selectedActionModelStat.hqRate}%) / 조치 후 재발생 {selectedActionModelStat.recurrence.toLocaleString()}기
                         </div>
                       </div>
                       <button style={styles.secondaryButton} onClick={() => setSelectedActionModel(null)}>닫기</button>
@@ -4351,10 +4431,11 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    <div style={styles.actionReportKpiGrid}>
+                    <div style={{ ...styles.actionReportKpiGrid, gridTemplateColumns: 'repeat(4, minmax(0, 1fr))' }}>
                       <VocKpiCard label="단순조치" value={`${selectedActionModelStat.simple.toLocaleString()}건`} hint={`${selectedActionModelStat.simpleRate}% · 현장/원격 복구`} color={COLORS.green} bg={COLORS.greenSoft} />
                       <VocKpiCard label="부품사용" value={`${selectedActionModelStat.part.toLocaleString()}건`} hint={`${selectedActionModelStat.partRate}% · 자재/부품성`} color={COLORS.orange} bg={COLORS.orangeSoft} />
                       <VocKpiCard label="본사이관" value={`${selectedActionModelStat.hq.toLocaleString()}건`} hint={`${selectedActionModelStat.hqRate}% · 기술지원`} color={COLORS.violet} bg={COLORS.violetSoft} />
+                      <VocKpiCard label="조치 후 재발생" value={`${selectedActionModelStat.recurrence.toLocaleString()}기`} hint="이전 완료 후 60일 이내 재접수·재완료" color={COLORS.red} bg={COLORS.redSoft} />
                     </div>
 
                     <div style={styles.actionReportGrid}>
@@ -4393,6 +4474,62 @@ export default function Dashboard() {
                           </div>
                         ))}
                       </div>
+                    </div>
+
+                    <div style={styles.actionReportBox}>
+                      <div style={styles.actionReportBoxTitle}>재발생 증상 TOP 5</div>
+                      <div style={styles.sectionSubText}>재발생으로 판정된 건의 접수내용을 기준으로 분류합니다. 재발생 기수와 달리 동일 충전기의 반복 재발도 각각 1건으로 집계됩니다.</div>
+                      {selectedActionModelInsight.topRecurrenceSymptoms.length === 0 ? (
+                        <div style={styles.actionReportEmpty}>선택 기간에 재발생 건이 없습니다.</div>
+                      ) : selectedActionModelInsight.topRecurrenceSymptoms.map((item, idx) => (
+                        <div key={item.symptom} style={styles.actionReportRankRow}>
+                          <div style={styles.actionReportRankLeft}>
+                            <span style={idx === 0 ? styles.rankBadgeTop : styles.rankBadge}>{idx + 1}</span>
+                            <div>
+                              <strong>{item.symptom}</strong>
+                              <div style={styles.actionReportSubText}>재발생 {selectedActionModelInsight.recurrenceRows.length.toLocaleString()}건 중 {item.rate}%</div>
+                            </div>
+                          </div>
+                          <strong>{item.count.toLocaleString()}건</strong>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={styles.selectedActionMiniHeader}>재발생 전체 상세리스트</div>
+                    <div style={{ ...styles.tableWrap, ...styles.recurrenceDetailTableWrap }}>
+                      <table style={styles.table}>
+                        <thead>
+                          <tr>
+                            <th>증상분류</th>
+                            <th>충전소명</th>
+                            <th>충전기 ID</th>
+                            <th>이전 완료일시</th>
+                            <th>재접수일시</th>
+                            <th>현재 완료일시</th>
+                            <th>접수내용</th>
+                            <th>조치분류</th>
+                            <th>완료내용</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedActionModelInsight.recurrenceRows.map((row) => (
+                            <tr key={`recurrence-${row.key}`}>
+                              <td><span style={styles.recurrenceSymptomBadge}>{row.recurrenceSymptom}</span></td>
+                              <td>{row.siteName}</td>
+                              <td>{row.chargerId}</td>
+                              <td>{row.previousCompletedAtText}</td>
+                              <td>{row.receivedAtText}</td>
+                              <td>{row.completedAtText}</td>
+                              <td style={styles.compactContentCell} title={row.receivedContent}>{row.receivedContent}</td>
+                              <td>{row.actionLabel}</td>
+                              <td style={styles.compactContentCell} title={row.completedContent}>{row.completedContent}</td>
+                            </tr>
+                          ))}
+                          {selectedActionModelInsight.recurrenceRows.length === 0 && (
+                            <tr><td colSpan="9" style={{ color: COLORS.sub, textAlign: 'center', padding: 24 }}>표시할 재발생 상세 데이터가 없습니다.</td></tr>
+                          )}
+                        </tbody>
+                      </table>
                     </div>
 
                     <div style={styles.actionExampleGrid}>
@@ -5328,13 +5465,13 @@ function VocKpiCard({ label, value, hint, color, bg }) {
   );
 }
 
-function ActionRateLine({ label, count, total, color }) {
+function ActionRateLine({ label, count, total, color, unit = '건' }) {
   const rate = percentOf(count, total);
   return (
     <div style={styles.actionRateLine}>
       <div style={styles.actionRateLabelRow}>
         <span>{label}</span>
-        <strong>{count.toLocaleString()}건 · {rate}%</strong>
+        <strong>{count.toLocaleString()}{unit} · {rate}%</strong>
       </div>
       <div style={styles.actionRateTrack}>
         <div style={{ ...styles.actionRateFill, width: `${Math.min(rate, 100)}%`, background: color }} />
@@ -6153,6 +6290,8 @@ const styles = {
   actionReportRankLeft: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 },
   actionReportSubText: { color: COLORS.sub, fontSize: 12, marginTop: 2, fontWeight: 800 },
   actionReportEmpty: { color: COLORS.sub, fontSize: 13, fontWeight: 800, padding: '10px 0' },
+  recurrenceDetailTableWrap: { maxHeight: 520, overflow: 'auto', margin: '12px 0 16px' },
+  recurrenceSymptomBadge: { display: 'inline-flex', borderRadius: 999, padding: '6px 9px', background: COLORS.redSoft, color: COLORS.red, fontSize: 12, fontWeight: 950, whiteSpace: 'nowrap' },
   actionExampleGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12, marginBottom: 14 },
   actionExampleBox: { border: `1px solid ${COLORS.line}`, background: '#fff', borderRadius: 16, padding: 13, minHeight: 136 },
   actionExampleTitle: { fontSize: 13, color: COLORS.slate, fontWeight: 950, marginBottom: 9 },

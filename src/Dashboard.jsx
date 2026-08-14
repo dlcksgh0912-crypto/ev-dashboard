@@ -1297,11 +1297,21 @@ function findHeaderIndex(headers, candidates) {
 
 function mapRawColumns(headerRow) {
   const headers = headerRow.map((h) => normalizeText(h));
+  const collectedAtIndex = findHeaderIndex(headers, [
+    '최근 수집일시',
+    '최근수집일시',
+    '최종 수집일시',
+    '최종수집일시',
+    '수집일시',
+    '수집 일시',
+  ]);
   return {
     chargerId: 2,
     siteName: 5,
     siteStatus: 6,
-    collectedAt: 10,
+    // 상태정보 엑셀 양식 변경으로 최근 수집일시가 K열에서 L열로 이동했습니다.
+    // 이후 열 위치가 다시 바뀌어도 헤더명으로 먼저 찾고, 찾지 못할 때만 L열을 사용합니다.
+    collectedAt: collectedAtIndex >= 0 ? collectedAtIndex : 11,
     overAbnormal: 17,
     usageCount: findHeaderIndex(headers, ['누적 사용량', '누적사용량']),
     address: findHeaderIndex(headers, ['주소']),

@@ -1297,6 +1297,15 @@ function findHeaderIndex(headers, candidates) {
 
 function mapRawColumns(headerRow) {
   const headers = headerRow.map((h) => normalizeText(h));
+  const withFallback = (candidates, fallback) => {
+    // 후보 헤더의 우선순위를 지키면서 실제 열 위치를 찾습니다.
+    // 같은 의미의 헤더가 여러 개 있어도 더 구체적인 이름을 먼저 사용합니다.
+    for (const candidate of candidates) {
+      const index = headers.findIndex((header) => header.includes(candidate));
+      if (index >= 0) return index;
+    }
+    return fallback;
+  };
   const collectedAtIndex = findHeaderIndex(headers, [
     '최근 수집일시',
     '최근수집일시',
@@ -1306,22 +1315,22 @@ function mapRawColumns(headerRow) {
     '수집 일시',
   ]);
   return {
-    chargerId: 2,
-    siteName: 5,
-    siteStatus: 6,
+    // B열에 사이트명이 추가되면서 기존 C열 이후 열이 한 칸씩 이동했습니다.
+    // 충전기 ID는 헤더명으로 먼저 찾고, 헤더를 못 찾을 때 신규 D열을 사용합니다.
+    chargerId: withFallback(['충전기ID', '충전기 ID', '충전기번호', '충전기 번호'], 3),
+    siteName: withFallback(['충전소명', '현장명', '사이트명'], 6),
+    siteStatus: withFallback(['충전소 상태', '충전소상태', '사이트 상태', '사이트상태', '운영상태'], 7),
     // 상태정보 엑셀 양식 변경으로 최근 수집일시가 K열에서 L열로 이동했습니다.
     // 이후 열 위치가 다시 바뀌어도 헤더명으로 먼저 찾고, 찾지 못할 때만 L열을 사용합니다.
     collectedAt: collectedAtIndex >= 0 ? collectedAtIndex : 11,
-    overAbnormal: 17,
+    overAbnormal: withFallback(['과다이상', '과다 이상'], 18),
     usageCount: findHeaderIndex(headers, ['누적 사용량', '누적사용량']),
     address: findHeaderIndex(headers, ['주소']),
     detailAddress: findHeaderIndex(headers, ['상세주소']),
     siteId: findHeaderIndex(headers, ['충전소ID', '충전소 Id', '충전소 id', '사이트ID', 'site_id']) >= 0
       ? findHeaderIndex(headers, ['충전소ID', '충전소 Id', '충전소 id', '사이트ID', 'site_id'])
       : 0,
-    modelName: findHeaderIndex(headers, ['모델명', '모델 명', 'model']) >= 0
-      ? findHeaderIndex(headers, ['모델명', '모델 명', 'model'])
-      : 29, // 상태정보 리스트 AD열
+    modelName: withFallback(['모델명', '모델 명', 'model'], 30), // 신규 상태정보 리스트 AE열
   };
 }
 
